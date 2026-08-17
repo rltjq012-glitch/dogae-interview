@@ -13,64 +13,191 @@ import pymupdf
 import os
 import re
 from google import genai
-from google.genai import types  # 오디오 파일 처리를 위해 추가
+from google.genai import types
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
+# 페이지 기본 설정
 st.set_page_config(page_title="도개고 면접 마스터", layout="wide", page_icon="🎓")
 
-# 🌟 트렌디한 웹디자인 UI/UX 커스텀 CSS 주입 (눈부심 해결) 🌟
+# 🌟 [디자인 대개편] 트렌디한 고급 UI/UX 및 다크모드 대응 CSS 주입 🌟
 custom_css = """
 <style>
+/* 트렌디한 Pretendard 폰트 전역 적용 */
 @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
 html, body, [class*="css"] {
     font-family: 'Pretendard', sans-serif !important;
 }
-h1, h2, h3 {
-    color: #3b82f6 !important; 
-    font-weight: 800 !important;
+
+/* 라이트모드 기본 배경색 (이미지와 같은 따뜻한 베이지 톤) */
+@media (prefers-color-scheme: light) {
+    [data-testid="stAppViewContainer"] {
+        background-color: #F9F8F3 !important;
+    }
+    [data-testid="stSidebar"] {
+        background-color: #F0EFEA !important;
+    }
+}
+
+/* 다크모드 기본 배경색 (고급스러운 다크 그레이) */
+@media (prefers-color-scheme: dark) {
+    [data-testid="stAppViewContainer"] {
+        background-color: #121212 !important;
+    }
+    [data-testid="stSidebar"] {
+        background-color: #1A1A1A !important;
+    }
+}
+
+/* 🎓 헤더 배너 (딥그린 & 골드 조합) */
+.hero-banner {
+    background: linear-gradient(135deg, #192c23 0%, #294435 100%);
+    border-radius: 16px;
+    padding: 2.5rem 3rem;
+    color: white;
+    margin-bottom: 2rem;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+    position: relative;
+    overflow: hidden;
+}
+.hero-badge {
+    display: inline-block;
+    border: 1px solid rgba(255,255,255,0.3);
+    padding: 0.3rem 1rem;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    color: #cbd5e1;
+    margin-bottom: 1rem;
+    letter-spacing: 1px;
+}
+.hero-title {
+    font-size: 2.4rem;
+    font-weight: 800;
+    margin: 0 0 0.5rem 0;
+    color: #ffffff;
     letter-spacing: -0.5px;
 }
-.stButton>button {
-    background: linear-gradient(135deg, #1e3a8a, #3b82f6) !important;
+.hero-subtitle {
+    font-size: 1.05rem;
+    color: #a7f3d0;
+    margin: 0;
+    font-weight: 400;
+}
+.hero-line {
+    width: 50px;
+    height: 3px;
+    background-color: #d4af37;
+    margin-top: 20px;
+    border-radius: 2px;
+}
+
+/* STEP 텍스트 디자인 */
+.step-text {
+    color: #d4af37;
+    font-weight: 800;
+    font-size: 0.95rem;
+    margin-bottom: -15px;
+    letter-spacing: 1.5px;
+}
+
+/* 채팅 메시지 박스 커스텀 */
+[data-testid="stChatMessage"] {
+    background-color: rgba(255,255,255,0.7);
+    border-radius: 16px;
+    padding: 1.5rem;
+    margin-bottom: 15px;
+    border: 1px solid rgba(0,0,0,0.05);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.02);
+}
+@media (prefers-color-scheme: dark) {
+    [data-testid="stChatMessage"] {
+        background-color: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.1);
+    }
+}
+
+/* 둥근 테두리의 다운로드 버튼 (아웃라인 스타일) */
+.stDownloadButton > button {
+    background-color: transparent !important;
+    border: 1.5px solid #94a3b8 !important;
+    color: inherit !important;
+    border-radius: 30px !important;
+    font-weight: 600 !important;
+    padding: 0.5rem 1rem !important;
+    transition: all 0.3s ease !important;
+    width: 100%;
+}
+.stDownloadButton > button:hover {
+    background-color: #e2e8f0 !important;
+    border-color: #475569 !important;
+    transform: translateY(-2px);
+}
+@media (prefers-color-scheme: dark) {
+    .stDownloadButton > button:hover {
+        background-color: #334155 !important;
+        border-color: #f8fafc !important;
+    }
+}
+
+/* 메인 동작 버튼 (생성 버튼) */
+div.stButton > button:first-child {
+    background: linear-gradient(135deg, #192c23 0%, #294435 100%) !important;
     color: white !important;
-    border-radius: 12px !important;
     border: none !important;
-    padding: 0.6rem 1.2rem !important;
+    border-radius: 12px !important;
+    padding: 0.7rem 1.2rem !important;
     font-weight: 700 !important;
     font-size: 1.1rem !important;
     box-shadow: 0 4px 6px rgba(0,0,0,0.1) !important;
     transition: all 0.3s ease !important;
     width: 100%;
 }
-.stButton>button:hover {
+div.stButton > button:first-child:hover {
     transform: translateY(-2px) !important;
     box-shadow: 0 6px 12px rgba(0,0,0,0.2) !important;
 }
+
+/* 입력 필드 디자인 */
 .stTextInput>div>div>input {
     border-radius: 8px !important;
-    border: 1.5px solid #cbd5e1 !important;
+    border: 1px solid #cbd5e1 !important;
 }
 .stTextInput>div>div>input:focus {
-    border-color: #3b82f6 !important;
-    box-shadow: 0 0 0 1px #3b82f6 !important;
+    border-color: #294435 !important;
+    box-shadow: 0 0 0 1px #294435 !important;
 }
 .stFileUploader>div>div {
     border-radius: 12px !important;
     border: 2px dashed #cbd5e1 !important;
+    background-color: rgba(255,255,255,0.5) !important;
 }
-hr {
-    border-top: 2px dashed #e2e8f0 !important;
+@media (prefers-color-scheme: dark) {
+    .stFileUploader>div>div {
+        background-color: rgba(0,0,0,0.2) !important;
+        border-color: #475569 !important;
+    }
 }
 </style>
 """
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------------
-# [1] 스마트 PDF 및 제미나이 통신 함수 (텍스트 및 오디오 지원)
+# 상단 헤더 배너 (HTML)
+# -------------------------------------------------------------------------
+st.markdown("""
+<div class="hero-banner">
+    <div class="hero-badge">DOGAE HIGH SCHOOL · 진로진학부</div>
+    <h1 class="hero-title">🎓 도개고 대입 모의면접 마스터 솔루션</h1>
+    <p class="hero-subtitle">생기부와 실제 대학 기출 형식을 정교하게 분석해, 실전과 같은 모의면접 세트를 설계합니다</p>
+    <div class="hero-line"></div>
+</div>
+""", unsafe_allow_html=True)
+
+# -------------------------------------------------------------------------
+# [1] 스마트 PDF 및 제미나이 통신 함수
 # -------------------------------------------------------------------------
 def extract_text_from_pdf(uploaded_file):
     doc = pymupdf.open(stream=uploaded_file.read(), filetype="pdf")
@@ -123,7 +250,6 @@ def call_gemini_audio_eval(audio_bytes, api_key):
     3. 🔥 **[추가 압박 꼬리질문]**: 학생의 답변 내용 중 논리적 비약이 있거나 더 깊이 파고들 만한 날카로운 꼬리질문을 하나 던져주세요.
     """
     try:
-        # 신규 GenAI SDK 오디오 파일 처리 규격 적용
         audio_part = types.Part.from_bytes(data=audio_bytes, mime_type='audio/wav')
         response = client.models.generate_content(
             model='gemini-1.5-flash',
@@ -264,10 +390,8 @@ def create_word_files(content, student_name, interview_type, target_desc):
                     row_i1 = table.add_row()
                     set_cell_background(row_i1.cells[0], "F9F9F9")
                     add_parsed_text_to_cell(row_i1.cells[0], f"**[평가 의도 1]**\n{i1_text}")
-                    
                     row_a1 = table.add_row()
                     add_parsed_text_to_cell(row_a1.cells[0], f"**[모범 답안 가이드 1]**\n{a1_text}")
-                    
                     row_f1 = table.add_row()
                     set_cell_background(row_f1.cells[0], "FFF4F4")
                     add_parsed_text_to_cell(row_f1.cells[0], f"**[압박용 꼬리질문 1]**\n{f1_text}")
@@ -279,10 +403,8 @@ def create_word_files(content, student_name, interview_type, target_desc):
                         row_i2 = table.add_row()
                         set_cell_background(row_i2.cells[0], "F9F9F9")
                         add_parsed_text_to_cell(row_i2.cells[0], f"**[평가 의도 2]**\n{i2_text}")
-                        
                         row_a2 = table.add_row()
                         add_parsed_text_to_cell(row_a2.cells[0], f"**[모범 답안 가이드 2]**\n{a2_text}")
-                        
                         row_f2 = table.add_row()
                         set_cell_background(row_f2.cells[0], "FFF4F4")
                         add_parsed_text_to_cell(row_f2.cells[0], f"**[압박용 꼬리질문 2]**\n{f2_text}")
@@ -304,10 +426,8 @@ def create_word_files(content, student_name, interview_type, target_desc):
                     row_i = table.add_row()
                     set_cell_background(row_i.cells[0], "F9F9F9")
                     add_parsed_text_to_cell(row_i.cells[0], f"**[평가 의도]**\n{i_text}")
-                    
                     row_a = table.add_row()
                     add_parsed_text_to_cell(row_a.cells[0], f"**[모범 답안 가이드]**\n{a_text}")
-                    
                     row_f = table.add_row()
                     set_cell_background(row_f.cells[0], "FFF4F4")
                     add_parsed_text_to_cell(row_f.cells[0], f"**[압박용 꼬리질문]**\n{f_text}")
@@ -349,11 +469,8 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "word_files" not in st.session_state:
     st.session_state.word_files = None
-# 중복 평가를 막기 위한 세션 상태
 if "last_audio_size" not in st.session_state:
     st.session_state.last_audio_size = 0
-
-st.title("🎓 도개고 대입 모의면접 마스터 솔루션")
 
 with st.expander("📖 [클릭] 프로그램 사용 설명서 및 PDF OCR 변환 방법", expanded=False):
     st.markdown("""
@@ -526,7 +643,7 @@ if st.button("🚀 면접 패키지 생성 시작"):
         {TEMPLATE_JESIMUN}
         """
     
-    with st.spinner(f"⏳ 로딩중... 면접 문항을 정밀 조립하고 있습니다."):
+    with st.spinner(f"⏳ 로딩중... 생기부 분석 브리핑 및 면접 문항을 정밀 조립하고 있습니다."):
         try:
             result_text = call_gemini(prompt, api_key)
             
@@ -547,9 +664,10 @@ if st.button("🚀 면접 패키지 생성 시작"):
             st.error(f"❌ 생성 실패: {e}")
 
 # -------------------------------------------------------------------------
-# [5] 결과 대시보드 및 실시간 피드백 (음성 인식 중복 호출 방어 포함)
+# [5] 결과 대시보드 및 실시간 피드백
 # -------------------------------------------------------------------------
 if st.session_state.chat_history:
+    st.markdown("<div class='step-text'>STEP 2 · 결과 확인 및 피드백</div>", unsafe_allow_html=True)
     st.markdown("## 📋 면접 문항 대시보드 및 실시간 피드백")
     
     if st.session_state.word_files:
@@ -578,7 +696,6 @@ if st.session_state.chat_history:
     audio_value = st.audio_input("🎙️ 음성으로 면접 답변하기 (녹음 버튼을 누르고 답변을 말해보세요!)")
     
     if audio_value is not None:
-        # 이전에 처리한 오디오 파일과 크기가 다른(새로운) 파일인 경우에만 AI 평가 진행
         if st.session_state.last_audio_size != audio_value.size:
             if not api_key:
                 st.error("API 키를 입력해 주세요.")
@@ -590,7 +707,6 @@ if st.session_state.chat_history:
                     st.session_state.chat_history.append({"role": "user", "content": "[🎙️ 음성 답변 제출 완료]"})
                     st.session_state.chat_history.append({"role": "assistant", "content": eval_result})
                     
-                    # 방어막 갱신: 이번에 처리한 오디오 크기를 저장해 둠 (무한루프 방지)
                     st.session_state.last_audio_size = audio_value.size
                     st.rerun()
 
@@ -607,7 +723,7 @@ if st.session_state.chat_history:
                 
                 if is_doc_request:
                     chat_path = create_chat_history_word(st.session_state.chat_history, student_name)
-                    response_text = "네! 지금까지 나눈 대화 내용과 평가를 깔끔한 워드 문서로 생성했습니다. 상단 또는 아래의 **'💬 피드백 대화 내역 (.docx)'** 다운로드 버튼을 클릭해 주세요!"
+                    response_text = "네! 지금까지 나눈 대화 내용을 깔끔한 워드 문서로 생성했습니다. 상단 또는 아래의 **'💬 피드백 대화 내역 (.docx)'** 다운로드 버튼을 클릭해 주세요!"
                     st.markdown(response_text)
                     st.session_state.chat_history.append({"role": "assistant", "content": response_text})
                     st.rerun()
