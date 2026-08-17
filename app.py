@@ -185,11 +185,11 @@ div.stButton > button:first-child:hover {
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------------
-# 상단 헤더 배너 (HTML)
+# 상단 헤더 배너 (HTML) - 제작자 명시
 # -------------------------------------------------------------------------
 st.markdown("""
 <div class="hero-banner">
-    <div class="hero-badge">DOGAE HIGH SCHOOL · 진로진학부</div>
+    <div class="hero-badge">도개고등학교 - 김기섭</div>
     <h1 class="hero-title">🎓 도개고 대입 모의면접 마스터 솔루션</h1>
     <p class="hero-subtitle">생기부와 실제 대학 기출 형식을 정교하게 분석해, 실전과 같은 모의면접 세트를 설계합니다</p>
     <div class="hero-line"></div>
@@ -250,7 +250,6 @@ def call_gemini_audio_eval(audio_bytes, api_key):
     3. 🔥 **[추가 압박 꼬리질문]**: 학생의 답변 내용 중 논리적 비약이 있거나 더 깊이 파고들 만한 날카로운 꼬리질문을 하나 던져주세요.
     """
     
-    # 🔥 음성 모델에서도 404 에러 방지를 위해 동적 모델 스캐너 적용 🔥
     available_models = []
     try:
         for m in client.models.list():
@@ -664,7 +663,7 @@ if st.button("🚀 면접 패키지 생성 시작"):
         {TEMPLATE_JESIMUN}
         """
     
-    with st.spinner(f"⏳ 로딩중... 면접 문항을 정밀 조립하고 있습니다."):
+    with st.spinner(f"⏳ 로딩중... 생기부 분석 브리핑 및 면접 문항을 정밀 조립하고 있습니다."):
         try:
             result_text = call_gemini(prompt, api_key)
             
