@@ -23,7 +23,7 @@ from docx.oxml.ns import qn
 # 페이지 기본 설정
 st.set_page_config(page_title="도개고 면접 마스터", layout="wide", page_icon="🎓")
 
-# 🌟 [디자인 대개편] 트렌디한 고급 UI/UX 및 다크모드 대응 CSS 주입 🌟
+# 🌟 트렌디한 고급 UI/UX 및 다크모드 대응 CSS 주입 🌟
 custom_css = """
 <style>
 /* 트렌디한 Pretendard 폰트 전역 적용 */
@@ -32,7 +32,7 @@ html, body, [class*="css"] {
     font-family: 'Pretendard', sans-serif !important;
 }
 
-/* 라이트모드 기본 배경색 (이미지와 같은 따뜻한 베이지 톤) */
+/* 라이트모드 기본 배경색 */
 @media (prefers-color-scheme: light) {
     [data-testid="stAppViewContainer"] {
         background-color: #F9F8F3 !important;
@@ -42,7 +42,7 @@ html, body, [class*="css"] {
     }
 }
 
-/* 다크모드 기본 배경색 (고급스러운 다크 그레이) */
+/* 다크모드 기본 배경색 */
 @media (prefers-color-scheme: dark) {
     [data-testid="stAppViewContainer"] {
         background-color: #121212 !important;
@@ -119,7 +119,7 @@ html, body, [class*="css"] {
     }
 }
 
-/* 둥근 테두리의 다운로드 버튼 (아웃라인 스타일) */
+/* 둥근 테두리의 다운로드 버튼 */
 .stDownloadButton > button {
     background-color: transparent !important;
     border: 1.5px solid #94a3b8 !important;
@@ -197,7 +197,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------------
-# [1] 스마트 PDF 및 제미나이 통신 함수
+# [1] 스마트 PDF 및 제미나이 통신 함수 (텍스트 및 오디오 404 방어)
 # -------------------------------------------------------------------------
 def extract_text_from_pdf(uploaded_file):
     doc = pymupdf.open(stream=uploaded_file.read(), filetype="pdf")
@@ -249,15 +249,36 @@ def call_gemini_audio_eval(audio_bytes, api_key):
     2. 📊 **[면접관의 평가]**: 학생의 답변을 '논리성, 표현력, 전공적합성'을 기준으로 분석하고 종합 평가를 [상 / 중 / 하]로 매겨주세요. 구체적인 칭찬과 보완점(피드백)을 작성해 주세요.
     3. 🔥 **[추가 압박 꼬리질문]**: 학생의 답변 내용 중 논리적 비약이 있거나 더 깊이 파고들 만한 날카로운 꼬리질문을 하나 던져주세요.
     """
+    
+    # 🔥 음성 모델에서도 404 에러 방지를 위해 동적 모델 스캐너 적용 🔥
+    available_models = []
     try:
-        audio_part = types.Part.from_bytes(data=audio_bytes, mime_type='audio/wav')
-        response = client.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=[audio_part, prompt]
-        )
-        return response.text
-    except Exception as e:
-        return f"음성 분석 실패: {e}\n(API 키 설정이나 모델 상태를 확인해 주세요.)"
+        for m in client.models.list():
+            name = m.name.replace("models/", "") if m.name.startswith("models/") else m.name
+            if "gemini-1.5" in name or "gemini-flash" in name:
+                available_models.append(name)
+    except:
+        pass
+        
+    if not available_models:
+        available_models = ["gemini-1.5-flash-latest", "gemini-1.5-flash"]
+        
+    models_to_try = sorted(available_models, key=lambda x: "flash" not in x)
+    
+    last_error = ""
+    for target_model in models_to_try[:3]:
+        try:
+            audio_part = types.Part.from_bytes(data=audio_bytes, mime_type='audio/wav')
+            response = client.models.generate_content(
+                model=target_model,
+                contents=[audio_part, prompt]
+            )
+            return response.text
+        except Exception as e:
+            last_error = str(e)
+            time.sleep(2)
+            
+    return f"음성 분석 실패: {last_error}\n(API 키 설정이나 모델 상태를 확인해 주세요.)"
 
 # -------------------------------------------------------------------------
 # [2] 워드 표 레이아웃 및 디자인 무너짐 완벽 방지 엔진
@@ -643,7 +664,7 @@ if st.button("🚀 면접 패키지 생성 시작"):
         {TEMPLATE_JESIMUN}
         """
     
-    with st.spinner(f"⏳ 로딩중... 생기부 분석 브리핑 및 면접 문항을 정밀 조립하고 있습니다."):
+    with st.spinner(f"⏳ 로딩중... 면접 문항을 정밀 조립하고 있습니다."):
         try:
             result_text = call_gemini(prompt, api_key)
             
