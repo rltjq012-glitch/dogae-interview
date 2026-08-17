@@ -13,7 +13,7 @@ from docx.oxml.ns import qn
 st.set_page_config(page_title="도개고 면접 마스터", layout="wide")
 
 # -------------------------------------------------------------------------
-# [1] 스마트 PDF 및 제미나이 통신 함수 (에러 자동 우회 100% 유지)
+# [1] 스마트 PDF 및 제미나이 통신 함수
 # -------------------------------------------------------------------------
 def extract_text_from_pdf(uploaded_file):
     doc = pymupdf.open(stream=uploaded_file.read(), filetype="pdf")
@@ -51,7 +51,7 @@ def call_gemini(prompt, api_key):
     raise Exception(f"AI 모델 통신 실패 (마지막 에러: {last_error})")
 
 # -------------------------------------------------------------------------
-# [2] 🔥 워드 표 생성 및 가독성/여백 최적화 엔진 (100% 유지) 🔥
+# [2] 워드 표 생성 및 가독성/여백 최적화 엔진
 # -------------------------------------------------------------------------
 def set_document_font(doc):
     style = doc.styles['Normal']
@@ -106,9 +106,9 @@ def create_word_files(content, student_name, interview_type, target_desc):
     
     for doc, is_teacher in [(doc_student, False), (doc_teacher, True)]:
         set_document_font(doc)
-        title_text = f"🎓 [{student_name}] {target_desc} 모의면접 {'지침서 (교사용)' if is_teacher else '워크북 (학생용)'}"
+        title_text = f"🎓 [{student_name}] {target_desc} 도개고 맞춤 모의면접 {'지침서 (교사용)' if is_teacher else '워크북 (학생용)'}"
         doc.add_heading(title_text, level=1)
-        doc.add_paragraph(f"[{type_label}] 본 문서는 AI 모의면접 마스터 솔루션에 의해 생성되었습니다.\n")
+        doc.add_paragraph(f"[{type_label}] 본 문서는 도개고등학교 진로진학 지도 기준에 맞춰 생성되었습니다.\n")
         
         blocks = content.split('### 📌')
         
@@ -196,18 +196,29 @@ if "word_files" not in st.session_state:
 
 st.title("🎓 도개고 대입 모의면접 마스터 솔루션")
 
-with st.expander("📖 [클릭] 프로그램 사용 설명서 및 가이드", expanded=False):
+# 🌟 [업데이트] OCR 변환 가이드가 포함된 상세 설명서 🌟
+with st.expander("📖 [클릭] 프로그램 사용 설명서 및 PDF OCR 변환 방법", expanded=False):
     st.markdown("""
     ### 🔑 Google Gemini API 키 발급 방법
     1. **Google AI Studio 접속:** [Google AI Studio](https://aistudio.google.com/)에 접속합니다.
     2. **구글 계정 로그인:** 평소 사용하는 구글 계정으로 로그인합니다.
     3. **API 키 생성:** 좌측 상단 'Get API key' 버튼을 클릭하여 키 생성 후 복사합니다.
 
+    ### 📂 [중요] 생기부 PDF는 반드시 '텍스트 추출(OCR)'된 파일이어야 합니다!
+    * **왜 필요한가요?** 단순 이미지(스캔본) PDF는 AI가 글자를 읽지 못하므로, **마우스로 글자가 드래그되거나 텍스트로 인식되는 PDF**여야만 정상 분석이 가능합니다.
+    * **스캔된 PDF를 OCR(텍스트형)로 변환하는 방법:**
+      1. **구글 드라이브(Google Drive) 활용 (가장 추천):**
+         - 스캔된 생기부 PDF 파일을 구글 드라이브에 업로드합니다.
+         - 업로드된 파일 우클릭 ➔ **[연결 앱]** ➔ **[Google 문서]**를 선택하여 엽니다.
+         - 구글 문서로 열리면 이미지가 텍스트로 자동 변환됩니다. 상단 메뉴 **[파일] ➔ [다운로드] ➔ [Microsoft Word(.docx)]** 또는 PDF로 저장합니다.
+      2. **온라인 무료 툴 활용:** 
+         - 'ILOVEPDF' 또는 'Smallpdf' 등의 사이트에서 **'OCR PDF(PDF 텍스트 변환)'** 메뉴를 이용해 변환합니다.
+
     ### 💡 프로그램 사용 순서
     1. 왼쪽 사이드바에 API 키를 입력합니다.
     2. 면접 방식(생기부 기반/제시문 기반)을 선택합니다.
     3. 대학, 학과, 난이도를 설정합니다.
-    4. 생기부 면접일 경우 PDF 업로드 후 생성 버튼을 누릅니다.
+    4. 생기부 면접일 경우 **OCR 변환된 PDF**를 업로드하고 생성 버튼을 누릅니다.
     """)
 
 with st.sidebar:
@@ -235,16 +246,15 @@ with col2:
 
 uploaded_file = None
 if interview_type == "생기부 기반 면접":
-    uploaded_file = st.file_uploader("📂 학생 생기부 PDF 업로드", type=["pdf"])
+    uploaded_file = st.file_uploader("📂 학생 생기부 PDF 업로드 (OCR 변환 필수)", type=["pdf"])
 
 st.markdown("---")
 
 # -------------------------------------------------------------------------
-# [4] 생성 버튼 로직 (프롬프트 분리 100% 유지)
+# [4] 생성 버튼 로직
 # -------------------------------------------------------------------------
 target_desc = f"{uni}_{major}" 
 
-# 템플릿 변수 분리 (챗봇 피드백에서도 동일하게 쓰기 위해 상단 배치)
 TEMPLATE_SANGBU = """
 ### 📌 [영역: OOO] **[과목명/활동명]**
 [질문]
@@ -284,13 +294,14 @@ if st.button("🚀 면접 패키지 생성 시작"):
     
     if interview_type == "생기부 기반 면접":
         prompt = f"""
-        당신은 {uni} {major} 입학사정관입니다. 지원자 '{student_name}' 학생의 생기부만 철저히 분석하여 면접 질문을 만드세요. 절대 제시문이나 상황을 주지 마세요.
+        당신은 도개고등학교의 진학 지도 노하우와 {uni} {major} 입학사정관의 시각을 겸비한 최고급 면접 출제위원입니다. 
+        지원자 '{student_name}' 학생의 생기부를 분석하여 도개고 선배들이 실제 상위권/지역거점 대학 면접에서 마주했던 수준 높은 기출 문항들의 난이도와 깊이를 반영해 질문을 만드세요[cite: 3, 4].
         면접 난이도: {difficulty}
         
         [지시사항]
         1. 생기부 5대 영역(1. 교과세특, 2. 창체, 3. 동아리, 4. 행특, 5. 독서/기타)을 모두 뒤져서 총 5세트를 만드세요.
         2. 과목명이나 주요 활동명은 반드시 **[생활과 윤리]** 처럼 볼드체로 묶어주세요.
-        3. 절대 '제시문에 따르면' 같은 말을 쓰지 마세요. 생기부 내용만 바탕으로 질문하세요.
+        3. 단순 암기식 질문이 아니라 학생부 활동의 진위 여부, 동기, 심화 탐구 과정, 실생활 적용력을 파악하는 도개고 스타일의 날카로운 꼬리질문을 포함하세요[cite: 3, 4].
         
         [출력 템플릿 엄수 - 파싱을 위해 키워드 대괄호를 절대 변경하지 마세요]
         {TEMPLATE_SANGBU}
@@ -300,11 +311,11 @@ if st.button("🚀 면접 패키지 생성 시작"):
         """
     else: 
         prompt = f"""
-        당신은 {uni} {major} 입학사정관입니다. {major} 전공적합성과 논리력을 평가하기 위한 고난도 제시문 기반 면접을 출제하세요.
+        당신은 도개고등학교 진학 지도 기준에 맞춘 상위권 대학 제시문 면접 출제위원입니다. {major} 전공적합성과 논리력을 평가하기 위한 고난도 제시문 기반 면접을 출제하세요.
         면접 난이도: {difficulty}
         
         [지시사항]
-        1. 생기부 내용은 무시하세요. {major} 학과와 관련된 고난도 딜레마 상황이나 철학적/학술적 주제가 담긴 '상황 A, B' (또는 제시문 가, 나)를 창작하여 먼저 제시하세요.
+        1. 생기부 내용은 무시하세요. {major} 학과와 관련된 고난도 딜레마 상황이나 철학적/학술적 주제가 담긴 '상황 A, B' (또는 제시문 가, 나)를 도개고 학생들의 수능/구술 면접 수준에 맞춰 창작하여 먼저 제시하세요[cite: 3, 4].
         2. 제시된 상황/제시문을 비교 분석하거나 해결책을 묻는 문항 3세트를 만드세요.
         3. 서론이나 인사말은 절대 쓰지 말고, 바로 '### 📄 [상황 A]' 부터 출력하세요.
         
@@ -312,7 +323,7 @@ if st.button("🚀 면접 패키지 생성 시작"):
         {TEMPLATE_JESIMUN}
         """
     
-    with st.spinner(f"⏳ 로딩중... {interview_type}에 최적화된 문항을 분석하여 조립하고 있습니다."):
+    with st.spinner(f"⏳ 로딩중... 도개고 면접 기출 수준에 맞춰 {interview_type} 문항을 조립하고 있습니다."):
         try:
             result_text = call_gemini(prompt, api_key)
             
@@ -320,14 +331,18 @@ if st.button("🚀 면접 패키지 생성 시작"):
             st.session_state.word_files = (stu_path, tea_path)
             
             display_text = result_text.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n')
-            st.session_state.chat_history = [{"role": "assistant", "content": display_text}]
-            st.success("🎉 생성 및 문서 작업이 완료되었습니다!")
+            
+            # 대화 유도 문구 추가
+            full_display_text = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)"
+            
+            st.session_state.chat_history = [{"role": "assistant", "content": full_display_text}]
+            st.success("🎉 도개고 맞춤형 면접 패키지 및 워드 문서 생성이 완료되었습니다!")
             
         except Exception as e:
             st.error(f"❌ 생성 실패: {e}")
 
 # -------------------------------------------------------------------------
-# [5] 결과 대시보드 (대화 저장 + 실시간 메인 워드 파일 동기화 + 양식 파괴 방지 적용)
+# [5] 결과 대시보드
 # -------------------------------------------------------------------------
 if st.session_state.chat_history:
     st.markdown("## 📋 면접 문항 대시보드 및 실시간 피드백")
@@ -359,30 +374,41 @@ if st.session_state.chat_history:
             st.markdown(user_feedback)
             
         with st.chat_message("assistant"):
-            with st.spinner("요청하신 피드백을 반영하여 문항과 워드 파일을 동시에 업데이트 중입니다..."):
+            with st.spinner("요청하신 피드백을 반영하여 처리 중입니다..."):
                 
-                # 🌟 [보완 완료] 챗봇이 수정할 때도 면접 유형에 맞는 템플릿을 무조건 강제하도록 프롬프트 보강 🌟
-                required_template = TEMPLATE_SANGBU if interview_type == "생기부 기반 면접" else TEMPLATE_JESIMUN
+                doc_request_words = ["만들어", "생성", "다운", "파일", "문서로", "저장", "그래", "응", "네", "해줘"]
+                is_doc_request = any(w in user_feedback for w in doc_request_words) and len(user_feedback.strip()) < 15
                 
-                feedback_prompt = f"""
-                당신은 면접 문항 출제위원입니다. 이전 내용을 사용자의 피드백에 맞게 수정하되, 
-                프로그램이 표(Table)로 파싱해야 하므로 **반드시 다음 템플릿 구조와 [키워드]를 토씨 하나 틀리지 말고 유지**해야 합니다.
-                
-                [강제 유지 템플릿]
-                {required_template}
-                
-                사용자 피드백: "{user_feedback}"
-                """
-                try:
-                    new_result = call_gemini(feedback_prompt, api_key)
-                    display_text = new_result.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n')
+                if is_doc_request:
+                    chat_path = create_chat_history_word(st.session_state.chat_history, student_name)
+                    response_text = "네! 지금까지 나눈 대화 내용을 깔끔한 워드 문서로 생성했습니다. 상단 또는 아래의 **'💬 피드백 대화 내역 (.docx)'** 다운로드 버튼을 클릭해 주세요!"
+                    st.markdown(response_text)
+                    st.session_state.chat_history.append({"role": "assistant", "content": response_text})
+                    st.rerun()
+                else:
+                    required_template = TEMPLATE_SANGBU if interview_type == "생기부 기반 면접" else TEMPLATE_JESIMUN
                     
-                    st.markdown(display_text)
-                    st.session_state.chat_history.append({"role": "assistant", "content": display_text})
+                    feedback_prompt = f"""
+                    당신은 도개고 맞춤형 면접 출제위원입니다. 이전 내용을 사용자의 피드백에 맞게 수정하되, 
+                    도개고 기출 수준의 심도 있는 학술적/실천적 깊이를 유지하면서 **반드시 다음 템플릿 구조와 [키워드]를 토씨 하나 틀리지 말고 유지**해 주세요[cite: 3, 4].
                     
-                    stu_path, tea_path = create_word_files(new_result, student_name, interview_type, target_desc)
-                    st.session_state.word_files = (stu_path, tea_path)
-                    st.rerun() 
+                    [강제 유지 템플릿]
+                    {required_template}
                     
-                except Exception as e:
-                    st.error(f"피드백 반영 중 오류가 발생했습니다: {e}")
+                    사용자 피드백: "{user_feedback}"
+                    """
+                    try:
+                        new_result = call_gemini(feedback_prompt, api_key)
+                        display_text = new_result.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n')
+                        
+                        full_response = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)"
+                        
+                        st.markdown(full_response)
+                        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+                        
+                        stu_path, tea_path = create_word_files(new_result, student_name, interview_type, target_desc)
+                        st.session_state.word_files = (stu_path, tea_path)
+                        st.rerun() 
+                        
+                    except Exception as e:
+                        st.error(f"피드백 반영 중 오류가 발생했습니다: {e}")
