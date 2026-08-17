@@ -207,7 +207,7 @@ def create_word_files(content, student_name, interview_type, target_desc):
         set_document_font(doc)
         title_text = f"🎓 [{student_name}] {target_desc} 도개고 맞춤 모의면접 {'지침서 (교사용)' if is_teacher else '워크북 (학생용)'}"
         doc.add_heading(title_text, level=1)
-        doc.add_paragraph(f"[{type_label}] 본 문서는 도개고등학교 진로진학 지도 기준에 맞춰 생성되었습니다.\n")
+        doc.add_paragraph(f"[{type_label}] 본 문서는 서울대 구술고사 스타일 및 도개고 진로진학 지도 기준에 맞춰 생성되었습니다.\n")
         
         briefing_match = re.search(r'(### 🔍 \[생기부 심층 분석 브리핑 리포트\].*?)(?=### 📌|### 📄|$)', content, re.DOTALL)
         if briefing_match:
@@ -527,7 +527,7 @@ if st.button("🚀 면접 패키지 생성 시작"):
         {TEMPLATE_JESIMUN}
         """
     
-    with st.spinner(f"⏳ 로딩중... 면접 문항을 정밀 조립하고 있습니다."):
+    with st.spinner(f"⏳ 로딩중... 생기부 분석 브리핑 및 면접 문항을 정밀 조립하고 있습니다."):
         try:
             result_text = call_gemini(prompt, api_key)
             
@@ -576,10 +576,8 @@ if st.session_state.chat_history:
             
     st.markdown("💡 **Tip:** 아래 채팅창에서 📱휴대폰 키보드 마이크(🎤)를 눌러 말하거나, 우측 🎙️ 녹음 버튼을 활용해 보세요!")
     
-    # [신규] 오디오 입력 컴포넌트 추가
     audio_value = st.audio_input("🎙️ 음성으로 면접 답변하기 (녹음 버튼을 누르고 답변을 말해보세요!)")
     
-    # 1. 음성 입력이 들어온 경우 처리 로직
     if audio_value:
         if not api_key:
             st.error("API 키를 입력해 주세요.")
@@ -592,7 +590,6 @@ if st.session_state.chat_history:
                 st.session_state.chat_history.append({"role": "assistant", "content": eval_result})
                 st.rerun()
 
-    # 2. 텍스트 입력(피드백 또는 문서 저장 요청) 처리 로직
     if user_feedback := st.chat_input("질문을 더 어렵게 하거나 답변을 입력해보세요 (키보드 마이크🎤 활용 가능)"):
         st.session_state.chat_history.append({"role": "user", "content": user_feedback})
         with st.chat_message("user"):
