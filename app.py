@@ -3,6 +3,13 @@ import time
 import pymupdf
 import os
 import re
+import sys
+import io
+
+# 파이썬 전체 시스템 인코딩을 UTF-8로 강제 고정합니다.
+sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
+
 from google import genai
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
@@ -13,7 +20,7 @@ from docx.oxml.ns import qn
 st.set_page_config(page_title="도개고 면접 마스터", layout="wide")
 
 # -------------------------------------------------------------------------
-# [1] 스마트 PDF 및 제미나이 통신 함수 (인코딩 에러 방어 적용)
+# [1] 스마트 PDF 및 제미나이 통신 함수 (인코딩 완벽 방어)
 # -------------------------------------------------------------------------
 def extract_text_from_pdf(uploaded_file):
     doc = pymupdf.open(stream=uploaded_file.read(), filetype="pdf")
@@ -23,9 +30,10 @@ def extract_text_from_pdf(uploaded_file):
     return full_text
 
 def call_gemini(prompt, api_key):
-    # UTF-8 인코딩 안전장치 적용
     if isinstance(prompt, bytes):
         prompt = prompt.decode('utf-8', errors='ignore')
+    elif not isinstance(prompt, str):
+        prompt = str(prompt)
         
     client = genai.Client(api_key=api_key)
     
