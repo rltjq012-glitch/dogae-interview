@@ -87,7 +87,7 @@ def add_intro_paragraphs(doc, text):
         p = doc.add_paragraph()
         p.paragraph_format.line_spacing = 1.3
         
-        if line.startswith("### 📄"):
+        if line.startswith("### 📄") or line.startswith("### 📌"):
             run = p.add_run(line)
             run.bold = True
             run.font.size = Pt(12)
@@ -109,7 +109,7 @@ def create_word_files(content, student_name, interview_type, target_desc):
         set_document_font(doc)
         title_text = f"🎓 [{student_name}] {target_desc} 도개고 맞춤 모의면접 {'지침서 (교사용)' if is_teacher else '워크북 (학생용)'}"
         doc.add_heading(title_text, level=1)
-        doc.add_paragraph(f"[{type_label}] 본 문서는 도개고등학교 진로진학 지도 기준에 맞춰 생성되었습니다.\n")
+        doc.add_paragraph(f"[{type_label}] 본 문서는 서울대 구술고사 스타일 및 도개고 진로진학 기준에 맞춰 생성되었습니다.\n")
         
         blocks = content.split('### 📌')
         intro_text = blocks[0].strip()
@@ -132,17 +132,19 @@ def create_word_files(content, student_name, interview_type, target_desc):
             add_parsed_text_to_cell(row_title.cells[0], f"📌 {title}")
             
             if is_jesimun:
-                # 제시문 면접: 질문 1, 질문 2 파싱
-                q1_match = re.search(r'\[질문 1\](.*?)(?=\[평가의도 1\]|\[질문 2\]|$)', body, re.DOTALL)
+                # 서울대 구술고사 스타일 파싱 (제시문 + 문제 1, 문제 2)
+                js_match = re.search(r'\[제시문\](.*?)(?=\[문제 1\]|$)', body, re.DOTALL)
+                q1_match = re.search(r'\[문제 1\](.*?)(?=\[평가의도 1\]|\[문제 2\]|$)', body, re.DOTALL)
                 i1_match = re.search(r'\[평가의도 1\](.*?)(?=\[모범답안 1\]|$)', body, re.DOTALL)
                 a1_match = re.search(r'\[모범답안 1\](.*?)(?=\[꼬리질문 1\]|$)', body, re.DOTALL)
-                f1_match = re.search(r'\[꼬리질문 1\](.*?)(?=\[질문 2\]|$)', body, re.DOTALL)
+                f1_match = re.search(r'\[꼬리질문 1\](.*?)(?=\[문제 2\]|$)', body, re.DOTALL)
                 
-                q2_match = re.search(r'\[질문 2\](.*?)(?=\[평가의도 2\]|$)', body, re.DOTALL)
+                q2_match = re.search(r'\[문제 2\](.*?)(?=\[평가의도 2\]|$)', body, re.DOTALL)
                 i2_match = re.search(r'\[평가의도 2\](.*?)(?=\[모범답안 2\]|$)', body, re.DOTALL)
                 a2_match = re.search(r'\[모범답안 2\](.*?)(?=\[꼬리질문 2\]|$)', body, re.DOTALL)
                 f2_match = re.search(r'\[꼬리질문 2\](.*?)(?=$)', body, re.DOTALL)
                 
+                js_text = js_match.group(1).strip() if js_match else ""
                 q1_text = q1_match.group(1).strip() if q1_match else ""
                 i1_text = i1_match.group(1).strip() if i1_match else ""
                 a1_text = a1_match.group(1).strip() if a1_match else ""
@@ -153,9 +155,13 @@ def create_word_files(content, student_name, interview_type, target_desc):
                 a2_text = a2_match.group(1).strip() if a2_match else ""
                 f2_text = f2_match.group(1).strip() if f2_match else ""
                 
-                # 질문 1 행 추가
+                if js_text:
+                    row_js = table.add_row()
+                    set_cell_background(row_js.cells[0], "F4F6F9")
+                    add_parsed_text_to_cell(row_js.cells[0], f"**[서울대 스타일 구술 제시문 (가, 나, 다)]**\n{js_text}")
+                
                 row_q1 = table.add_row()
-                add_parsed_text_to_cell(row_q1.cells[0], f"**[질문 1]**\n{q1_text}")
+                add_parsed_text_to_cell(row_q1.cells[0], f"**[문제 1]**\n{q1_text}")
                 if is_teacher:
                     row_i1 = table.add_row()
                     set_cell_background(row_i1.cells[0], "F9F9F9")
@@ -168,10 +174,9 @@ def create_word_files(content, student_name, interview_type, target_desc):
                     set_cell_background(row_f1.cells[0], "FFF4F4")
                     add_parsed_text_to_cell(row_f1.cells[0], f"**[압박용 꼬리질문 1]**\n{f1_text}")
                 
-                # 질문 2 행 추가
                 if q2_text:
                     row_q2 = table.add_row()
-                    add_parsed_text_to_cell(row_q2.cells[0], f"**[질문 2]**\n{q2_text}")
+                    add_parsed_text_to_cell(row_q2.cells[0], f"**[문제 2]**\n{q2_text}")
                     if is_teacher:
                         row_i2 = table.add_row()
                         set_cell_background(row_i2.cells[0], "F9F9F9")
@@ -250,7 +255,6 @@ if "word_files" not in st.session_state:
 
 st.title("🎓 도개고 대입 모의면접 마스터 솔루션")
 
-# 🌟 [업데이트] OCR 변환 가이드가 포함된 상세 설명서 🌟
 with st.expander("📖 [클릭] 프로그램 사용 설명서 및 PDF OCR 변환 방법", expanded=False):
     st.markdown("""
     ### 🔑 Google Gemini API 키 발급 방법
@@ -305,7 +309,7 @@ if interview_type == "생기부 기반 면접":
 st.markdown("---")
 
 # -------------------------------------------------------------------------
-# [4] 생성 버튼 로직
+# [4] 생성 버튼 로직 (서울대 구술고사 스타일 3세트 독립 구조 반영)
 # -------------------------------------------------------------------------
 target_desc = f"{uni}_{major}" 
 
@@ -322,27 +326,19 @@ TEMPLATE_SANGBU = """
 """
 
 TEMPLATE_JESIMUN = """
-### 📄 [제시문 1]
-(제시문 1 내용)
-
-### 📄 [제시문 2]
-(제시문 2 내용)
-
-### 📄 [제시문 3]
-(제시문 3 내용)
-
-### 📌 [세트 1] **[제시문 1 기반 문항]**
-[질문 1]
-(질문 1 내용)
+### 📌 [세트 1] **[학술 및 전공 딜레마 주제 1]**
+[제시문]
+(여기에 서울대 구술고사 스타일의 다중 제시문 (가), (나), (다) 작성)
+[문제 1]
+(문제 1 내용)
 [평가의도 1]
 (내용 작성)
 [모범답안 1]
 (내용 작성)
 [꼬리질문 1]
 (내용 작성)
-
-[질문 2]
-(질문 2 내용)
+[문제 2]
+(문제 2 내용)
 [평가의도 2]
 (내용 작성)
 [모범답안 2]
@@ -350,18 +346,19 @@ TEMPLATE_JESIMUN = """
 [꼬리질문 2]
 (내용 작성)
 
-### 📌 [세트 2] **[제시문 2 기반 문항]**
-[질문 1]
-(질문 1 내용)
+### 📌 [세트 2] **[학술 및 전공 딜레마 주제 2]**
+[제시문]
+(여기에 서울대 구술고사 스타일의 다중 제시문 (가), (나), (다) 작성)
+[문제 1]
+(문제 1 내용)
 [평가의도 1]
 (내용 작성)
 [모범답안 1]
 (내용 작성)
 [꼬리질문 1]
 (내용 작성)
-
-[질문 2]
-(질문 2 내용)
+[문제 2]
+(문제 2 내용)
 [평가의도 2]
 (내용 작성)
 [모범답안 2]
@@ -369,18 +366,19 @@ TEMPLATE_JESIMUN = """
 [꼬리질문 2]
 (내용 작성)
 
-### 📌 [세트 3] **[제시문 3 기반 문항]**
-[질문 1]
-(질문 1 내용)
+### 📌 [세트 3] **[학술 및 전공 딜레마 주제 3]**
+[제시문]
+(여기에 서울대 구술고사 스타일의 다중 제시문 (가), (나), (다) 작성)
+[문제 1]
+(문제 1 내용)
 [평가의도 1]
 (내용 작성)
 [모범답안 1]
 (내용 작성)
 [꼬리질문 1]
 (내용 작성)
-
-[질문 2]
-(질문 2 내용)
+[문제 2]
+(문제 2 내용)
 [평가의도 2]
 (내용 작성)
 [모범답안 2]
@@ -415,33 +413,34 @@ if st.button("🚀 면접 패키지 생성 시작"):
         """
     else: 
         prompt = f"""
-        당신은 도개고등학교 진학 지도 기준에 맞춘 상위권 대학 제시문 면접 출제위원입니다. {major} 전공적합성과 논리력을 평가하기 위한 고난도 제시문 기반 면접을 출제하세요.
+        당신은 서울대학교 면접 및 구술고사 출제위원입니다. {major} 전공적합성과 종합적 사고력, 논리적 추론 능력을 평가하기 위한 고난도 제시문 기반 구술고사를 출제하세요[cite: 5].
         면접 난이도: {difficulty}
         
         [지시사항]
-        1. 생기부 내용은 무시하세요. {major} 학과와 관련된 고난도 딜레마 상황이나 철학적/학술적 주제가 담긴 **제시문 3개**를 도개고 학생들의 수능/구술 면접 수준에 맞춰 먼저 창작하세요[cite: 3, 4].
-        2. **제시문 1개당 질문 2개씩** 연결하여 **총 3세트**(세트 1, 세트 2, 세트 3)를 구성하세요.
-        3. 서론이나 인사말은 절대 쓰지 말고, 바로 '### 📄 [제시문 1]' 부터 출력하세요.
+        1. 생기부 내용은 무시하세요. {major} 학과와 관련된 학술적 딜레마와 심층 개념을 담은 **완전 독립된 3개의 주제 세트**를 창작하세요.
+        2. **각 세트마다 복수의 제시문((가), (나), (다) 형태)과 [문제 1], [문제 2] (각각 평가의도, 모범답안, 압박 꼬리질문 포함)**가 유기적으로 묶인 **총 3개의 독립 세트**를 엄격히 만드세요[cite: 5].
+        3. 서론이나 인사말은 절대 쓰지 말고, 바로 '### 📌 [세트 1]' 부터 출력하세요.
         
         [출력 템플릿 엄수 - 파싱을 위해 키워드 대괄호를 절대 변경하지 마세요]
         {TEMPLATE_JESIMUN}
         """
     
-    with st.spinner(f"⏳ 로딩중... 도개고 면접 기출 수준에 맞춰 {interview_type} 문항을 조립하고 있습니다."):
+    with st.spinner(f"⏳ 로딩중... 서울대 구술고사 스타일의 {interview_type} 문항을 정밀 조립하고 있습니다."):
         try:
             result_text = call_gemini(prompt, api_key)
             
             stu_path, tea_path = create_word_files(result_text, student_name, interview_type, target_desc)
             st.session_state.word_files = (stu_path, tea_path)
             
-            display_text = result_text.replace('[질문 1]', '\n**💡 [질문 1]**\n').replace('[평가의도 1]', '\n**🎯 [평가 의도 1]**\n').replace('[모범답안 1]', '\n**✅ [모범 답안 가이드 1]**\n').replace('[꼬리질문 1]', '\n**🔥 [압박용 꼬리질문 1]**\n')
-            display_text = display_text.replace('[질문 2]', '\n**💡 [질문 2]**\n').replace('[평가의도 2]', '\n**🎯 [평가 의도 2]**\n').replace('[모범답안 2]', '\n**✅ [모범 답안 가이드 2]**\n').replace('[꼬리질문 2]', '\n**🔥 [압박용 꼬리질문 2]**\n')
+            display_text = result_text.replace('[문제 1]', '\n**💡 [문제 1]**\n').replace('[평가의도 1]', '\n**🎯 [평가 의도 1]**\n').replace('[모범답안 1]', '\n**✅ [모범 답안 가이드 1]**\n').replace('[꼬리질문 1]', '\n**🔥 [압박용 꼬리질문 1]**\n')
+            display_text = display_text.replace('[문제 2]', '\n**💡 [문제 2]**\n').replace('[평가의도 2]', '\n**🎯 [평가 의도 2]**\n').replace('[모범답안 2]', '\n**✅ [모범 답안 가이드 2]**\n').replace('[꼬리질문 2]', '\n**🔥 [압박용 꼬리질문 2]**\n')
             display_text = display_text.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n')
+            display_text = display_text.replace('[제시문]', '\n**📄 [서울대 스타일 구술 제시문 (가, 나, 다)]**\n')
             
             full_display_text = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)"
             
             st.session_state.chat_history = [{"role": "assistant", "content": full_display_text}]
-            st.success("🎉 도개고 맞춤형 면접 패키지 및 워드 문서 생성이 완료되었습니다!")
+            st.success("🎉 서울대 구술고사 스타일 면접 패키지 및 워드 문서 생성이 완료되었습니다!")
             
         except Exception as e:
             st.error(f"❌ 생성 실패: {e}")
@@ -493,14 +492,13 @@ if st.session_state.chat_history:
                 else:
                     required_template = TEMPLATE_SANGBU if interview_type == "생기부 기반 면접" else TEMPLATE_JESIMUN
                     
-                    # 사용자가 문항 추가를 요청한 경우 최소 2세트 이상 추가 생성 지시
                     add_instruction = ""
                     if any(w in user_feedback for w in ["더", "추가", "많이", "늘려", "또"]):
-                        add_instruction = "\n(주의: 사용자가 문항 추가를 요청했으므로, **제시문 1개 + 질문 2개로 구성된 세트를 최소 2세트 이상 추가로** 더 생성해 주세요!)"
+                        add_instruction = "\n(주의: 사용자가 문항 추가를 요청했으므로, 복수 [제시문] + [문제 1], [문제 2]로 구성된 독립 세트를 **최소 2세트 이상 추가로** 더 생성해 주세요!)[cite: 5]"
                     
                     feedback_prompt = f"""
-                    당신은 도개고 맞춤형 면접 출제위원입니다. 이전 내용을 사용자의 피드백에 맞게 수정하되, 
-                    도개고 기출 수준의 심도 있는 학술적/실천적 깊이를 유지하면서 **반드시 다음 템플릿 구조와 [키워드]를 토씨 하나 틀리지 말고 유지**해 주세요[cite: 3, 4].
+                    당신은 서울대 구술고사 맞춤형 면접 출제위원입니다. 이전 내용을 사용자의 피드백에 맞게 수정하되, 
+                    서울대 구술고사 기출 수준의 심도 있는 학술적 깊이를 유지하면서 **반드시 다음 템플릿 구조와 [키워드]를 토씨 하나 틀리지 말고 유지**해 주세요[cite: 5].
                     {add_instruction}
                     
                     [강제 유지 템플릿]
@@ -510,9 +508,10 @@ if st.session_state.chat_history:
                     """
                     try:
                         new_result = call_gemini(feedback_prompt, api_key)
-                        display_text = new_result.replace('[질문 1]', '\n**💡 [질문 1]**\n').replace('[평가의도 1]', '\n**🎯 [평가 의도 1]**\n').replace('[모범답안 1]', '\n**✅ [모범 답안 가이드 1]**\n').replace('[꼬리질문 1]', '\n**🔥 [압박용 꼬리질문 1]**\n')
-                        display_text = display_text.replace('[질문 2]', '\n**💡 [질문 2]**\n').replace('[평가의도 2]', '\n**🎯 [평가 의도 2]**\n').replace('[모범답안 2]', '\n**✅ [모범 답안 가이드 2]**\n').replace('[꼬리질문 2]', '\n**🔥 [압박용 꼬리질문 2]**\n')
+                        display_text = new_result.replace('[문제 1]', '\n**💡 [문제 1]**\n').replace('[평가의도 1]', '\n**🎯 [평가 의도 1]**\n').replace('[모범답안 1]', '\n**✅ [모범 답안 가이드 1]**\n').replace('[꼬리질문 1]', '\n**🔥 [압박용 꼬리질문 1]**\n')
+                        display_text = display_text.replace('[문제 2]', '\n**💡 [문제 2]**\n').replace('[평가의도 2]', '\n**🎯 [평가 의도 2]**\n').replace('[모범답안 2]', '\n**✅ [모범 답안 가이드 2]**\n').replace('[꼬리질문 2]', '\n**🔥 [압박용 꼬리질문 2]**\n')
                         display_text = display_text.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n')
+                        display_text = display_text.replace('[제시문]', '\n**📄 [서울대 스타일 구술 제시문 (가, 나, 다)]**\n')
                         
                         full_response = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)"
                         
