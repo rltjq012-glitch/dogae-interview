@@ -1,303 +1,203 @@
 import sys
-import os
-import locale
+import io
 
-# -------------------------------------------------------------------------
-# [0] 인코딩/로케일 하드닝
-# -------------------------------------------------------------------------
-for _loc in ("C.UTF-8", "en_US.UTF-8", "ko_KR.UTF-8", "Korean_Korea.65001", ""):
-    try:
-        locale.setlocale(locale.LC_ALL, _loc)
-        break
-    except Exception:
-        continue
-os.environ["PYTHONUTF8"] = "1"
-os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-os.environ.setdefault("LANG", "C.UTF-8")
-os.environ.setdefault("LC_ALL", "C.UTF-8")
-for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"):
-        try:
-            _stream.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+# 파이썬 표준 입출력 인코딩을 UTF-8로 완전히 강제 재설정합니다.
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
 
 import streamlit as st
 import time
-import json
-import requests
 import pymupdf
+import os
 import re
+from google import genai
+from google.genai import types
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-st.set_page_config(page_title="도개고 면접 마스터", page_icon="🎓", layout="wide")
-# -------------------------------------------------------------------------
-# [0-1] 디자인 시스템 - 프리미엄 (아이보리+딥그린+골드 / 다크모드 지원)
-# -------------------------------------------------------------------------
-if "dark_mode" not in st.session_state:
-    st.session_state.dark_mode = False
 
-with st.sidebar:
-    st.toggle("🌙 다크 모드", key="dark_mode")
+# 페이지 기본 설정
+st.set_page_config(page_title="도개고 면접 마스터", layout="wide", page_icon="🎓")
 
-def build_custom_css(dark: bool) -> str:
-    if dark:
-        variables = """
-        --ivory: #101C16;
-        --ivory-soft: #1B2B22;
-        --surface: #17251E;
-        --surface-border: #2A3D31;
-        --deep-green: #A7D9BE;
-        --deep-green-dark: #060D09;
-        --deep-green-light: #3E7B5D;
-        --gold: #E8C77E;
-        --gold-soft: #F3DFA8;
-        --text-dark: #EDEFE9;
-        --text-muted: #9FAA9C;
-        --hero-subtitle: #C9D6CC;
-        """
-        extra_rules = """
-        .stTextInput input, .stNumberInput input, [data-baseweb="select"] > div,
-        [data-baseweb="input"], textarea, [data-testid="stFileUploaderDropzone"] {
-            background-color: var(--surface) !important;
-            color: var(--text-dark) !important;
-            border-color: var(--surface-border) !important;
-        }
-        [data-baseweb="select"] input { color: var(--text-dark) !important; }
-        [data-baseweb="popover"] li, [data-baseweb="menu"] li { background-color: var(--surface) !important; color: var(--text-dark) !important; }
-        [data-testid="stFileUploaderDropzone"] button { background-color: var(--ivory-soft) !important; color: var(--text-dark) !important; }
-        [data-testid="stMarkdownContainer"] p, [data-testid="stMarkdownContainer"] li,
-        [data-testid="stMarkdownContainer"] span { color: var(--text-dark); }
-        .stRadio label, .stSelectbox label, .stTextInput label, .stFileUploader label { color: var(--text-dark) !important; }
-        [data-testid="stExpander"] summary { color: var(--text-dark) !important; }
-        [data-testid="stAlert"] { background-color: var(--surface) !important; }
-        """
-    else:
-        variables = """
-        --ivory: #FBF8F1;
-        --ivory-soft: #F1EBDB;
-        --surface: #FFFFFF;
-        --surface-border: #F1EBDB;
-        --deep-green: #1F4436;
-        --deep-green-dark: #12291F;
-        --deep-green-light: #2F6B52;
-        --gold: #C6A15B;
-        --gold-soft: #E4CD98;
-        --text-dark: #24291F;
-        --text-muted: #6B7266;
-        --hero-subtitle: #D8E3DA;
-        """
-        extra_rules = ""
-
-    return f"""
+# 🌟 트렌디한 고급 UI/UX 및 다크모드 대응 CSS 주입 🌟
+custom_css = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@500;700;900&family=Noto+Sans+KR:wght@300;400;500;700&display=swap');
+/* 트렌디한 Pretendard 폰트 전역 적용 */
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+html, body, [class*="css"] {
+    font-family: 'Pretendard', sans-serif !important;
+}
 
-:root {{
-    {variables}
-}}
+/* 라이트모드 기본 배경색 */
+@media (prefers-color-scheme: light) {
+    [data-testid="stAppViewContainer"] {
+        background-color: #F9F8F3 !important;
+    }
+    [data-testid="stSidebar"] {
+        background-color: #F0EFEA !important;
+    }
+}
 
-html, body, [class*="css"], .stMarkdown, p, span, div, label {{
-    font-family: 'Noto Sans KR', sans-serif;
-    color: var(--text-dark);
-}}
+/* 다크모드 기본 배경색 */
+@media (prefers-color-scheme: dark) {
+    [data-testid="stAppViewContainer"] {
+        background-color: #121212 !important;
+    }
+    [data-testid="stSidebar"] {
+        background-color: #1A1A1A !important;
+    }
+}
 
-.stApp {{
-    background: var(--ivory);
-}}
-
-[data-testid="stHeader"] {{
-    background: var(--ivory) !important;
-}}
-[data-testid="stHeader"] * {{
-    color: var(--text-dark) !important;
-}}
-[data-testid="stToolbarActions"] button svg, [data-testid="stMainMenu"] svg {{
-    fill: var(--text-dark) !important;
-}}
-
-h1, h2, h3, h4 {{
-    font-family: 'Noto Serif KR', serif !important;
-    color: var(--deep-green) !important;
-    letter-spacing: -0.01em;
-}}
-
-/* ---------- 히어로 배너 ---------- */
-.hero-banner {{
-    background: linear-gradient(135deg, var(--deep-green-dark) 0%, #0A1F16 100%);
-    border-radius: 20px;
-    padding: 2.6rem 2.6rem 2.1rem 2.6rem;
-    margin-bottom: 1.8rem;
-    box-shadow: 0 14px 34px rgba(18, 41, 31, 0.28);
+/* 🎓 헤더 배너 (딥그린 & 골드 조합) */
+.hero-banner {
+    background: linear-gradient(135deg, #192c23 0%, #294435 100%);
+    border-radius: 16px;
+    padding: 2.5rem 3rem;
+    color: white;
+    margin-bottom: 2rem;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.15);
     position: relative;
     overflow: hidden;
-    border: 1px solid rgba(198,161,91,0.18);
-}}
-.hero-banner::after {{
-    content: "";
-    position: absolute;
-    right: -70px; top: -70px;
-    width: 220px; height: 220px;
-    background: radial-gradient(circle, rgba(198,161,91,0.28) 0%, rgba(198,161,91,0) 72%);
-}}
-.hero-badge {{
+}
+.hero-badge {
     display: inline-block;
-    font-size: 0.72rem;
-    letter-spacing: 0.18em;
-    color: var(--gold-soft);
-    border: 1px solid rgba(230, 205, 152, 0.45);
-    border-radius: 999px;
-    padding: 0.28rem 0.95rem;
+    border: 1px solid rgba(255,255,255,0.3);
+    padding: 0.3rem 1rem;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    color: #cbd5e1;
     margin-bottom: 1rem;
-}}
-.hero-title {{
-    font-family: 'Noto Serif KR', serif !important;
-    color: #FBF8F1 !important;
-    font-size: 2.15rem !important;
-    font-weight: 700 !important;
-    margin: 0 0 0.55rem 0 !important;
-    line-height: 1.35;
-}}
-.hero-subtitle {{
-    color: var(--hero-subtitle);
-    font-size: 0.98rem;
-    font-weight: 300;
+    letter-spacing: 1px;
+}
+.hero-title {
+    font-size: 2.4rem;
+    font-weight: 800;
+    margin: 0 0 0.5rem 0;
+    color: #ffffff;
+    letter-spacing: -0.5px;
+}
+.hero-subtitle {
+    font-size: 1.05rem;
+    color: #a7f3d0;
     margin: 0;
-}}
-.hero-divider {{
-    width: 54px; height: 3px;
-    background: var(--gold);
-    border-radius: 3px;
-    margin: 1.1rem 0 0 0;
-}}
+    font-weight: 400;
+}
+.hero-line {
+    width: 50px;
+    height: 3px;
+    background-color: #d4af37;
+    margin-top: 20px;
+    border-radius: 2px;
+}
 
-/* ---------- 사이드바 ---------- */
-[data-testid="stSidebar"] {{
-    background: var(--deep-green-dark);
-}}
-[data-testid="stSidebar"] * {{
-    color: #FBF8F1 !important;
-}}
-[data-testid="stSidebar"] label, [data-testid="stSidebar"] p, [data-testid="stSidebar"] h1,
-[data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {{
-    color: var(--gold-soft) !important;
-}}
-[data-testid="stSidebar"] input {{
-    background: rgba(255,255,255,0.07) !important;
-    border: 1px solid rgba(198,161,91,0.45) !important;
-    color: #FBF8F1 !important;
-    border-radius: 8px !important;
-}}
+/* STEP 텍스트 디자인 */
+.step-text {
+    color: #d4af37;
+    font-weight: 800;
+    font-size: 0.95rem;
+    margin-bottom: -15px;
+    letter-spacing: 1.5px;
+}
 
-/* ---------- 버튼 ---------- */
-.stButton>button {{
-    background: linear-gradient(135deg, var(--deep-green-light), var(--deep-green-dark)) !important;
-    color: #FBF8F1 !important;
-    border: none !important;
-    border-radius: 999px !important;
-    padding: 0.65rem 1.7rem !important;
-    font-weight: 700 !important;
-    letter-spacing: 0.02em;
-    box-shadow: 0 6px 16px rgba(31,68,54,0.28);
-    transition: all 0.2s ease;
-}}
-.stButton>button:hover {{
-    box-shadow: 0 10px 22px rgba(198,161,91,0.45);
-    transform: translateY(-1px);
-    color: #FBF8F1 !important;
-}}
-.stButton>button p {{ color: #FBF8F1 !important; font-weight: 700 !important; }}
+/* 채팅 메시지 박스 커스텀 */
+[data-testid="stChatMessage"] {
+    background-color: rgba(255,255,255,0.7);
+    border-radius: 16px;
+    padding: 1.5rem;
+    margin-bottom: 15px;
+    border: 1px solid rgba(0,0,0,0.05);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.02);
+}
+@media (prefers-color-scheme: dark) {
+    [data-testid="stChatMessage"] {
+        background-color: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.1);
+    }
+}
 
-.stDownloadButton>button {{
-    background: var(--surface) !important;
-    color: var(--deep-green) !important;
-    border: 1.5px solid var(--deep-green) !important;
-    border-radius: 999px !important;
-    font-weight: 600 !important;
-    transition: all 0.2s ease;
-}}
-.stDownloadButton>button:hover {{
-    background: var(--deep-green) !important;
-    color: var(--ivory) !important;
-}}
-.stDownloadButton>button:hover p {{ color: var(--ivory) !important; }}
-
-/* ---------- 카드 / 컨테이너 ---------- */
-[data-testid="stExpander"] {{
-    background: var(--surface);
-    border: 1px solid var(--surface-border);
-    border-left: 4px solid var(--gold);
-    border-radius: 14px;
-    box-shadow: 0 2px 12px rgba(31,68,54,0.06);
-}}
-[data-testid="stVerticalBlockBorderWrapper"] {{
-    border-radius: 14px;
-}}
-
-hr {{ border-top: 1px solid var(--surface-border); }}
-
-/* ---------- 채팅 ---------- */
-[data-testid="stChatMessage"] {{
-    background: var(--surface);
-    border-radius: 14px;
-    border: 1px solid var(--surface-border);
-    box-shadow: 0 2px 10px rgba(31,68,54,0.05);
-    padding: 0.45rem 0.3rem;
-}}
-[data-testid="stChatInput"] {{
-    background: var(--surface) !important;
-    border-radius: 12px !important;
-}}
-[data-testid="stChatInput"] textarea {{
-    border-radius: 12px !important;
-    background: var(--surface) !important;
-    color: var(--text-dark) !important;
-}}
-
-/* ---------- 입력 요소 포커스 ---------- */
-input:focus, textarea:focus, [data-baseweb="select"]:focus-within {{
-    border-color: var(--gold) !important;
-    box-shadow: 0 0 0 1px var(--gold) !important;
-}}
-
-/* 텍스트 입력창 전체 래퍼(비밀번호 표시 버튼 포함)가 항상 흰 배경으로 튀는 문제 보정 */
-[data-testid="stTextInputRootElement"] {{
-    background-color: var(--surface) !important;
-    border-color: var(--surface-border) !important;
-}}
-[data-testid="stTextInput"] button, [data-baseweb="input"] button,
-[data-testid="stTextInput"] [role="button"] {{
+/* 둥근 테두리의 다운로드 버튼 */
+.stDownloadButton > button {
     background-color: transparent !important;
-}}
-[data-testid="stTextInput"] button svg, [data-baseweb="input"] button svg {{
-    fill: var(--text-muted) !important;
-}}
+    border: 1.5px solid #94a3b8 !important;
+    color: inherit !important;
+    border-radius: 30px !important;
+    font-weight: 600 !important;
+    padding: 0.5rem 1rem !important;
+    transition: all 0.3s ease !important;
+    width: 100%;
+}
+.stDownloadButton > button:hover {
+    background-color: #e2e8f0 !important;
+    border-color: #475569 !important;
+    transform: translateY(-2px);
+}
+@media (prefers-color-scheme: dark) {
+    .stDownloadButton > button:hover {
+        background-color: #334155 !important;
+        border-color: #f8fafc !important;
+    }
+}
 
-section[data-testid="stFileUploaderDropzone"] {{
-    border: 1.5px dashed var(--deep-green-light) !important;
-    background: var(--ivory-soft) !important;
-    border-radius: 14px !important;
-}}
+/* 메인 동작 버튼 (생성 버튼) */
+div.stButton > button:first-child {
+    background: linear-gradient(135deg, #192c23 0%, #294435 100%) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 12px !important;
+    padding: 0.7rem 1.2rem !important;
+    font-weight: 700 !important;
+    font-size: 1.1rem !important;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1) !important;
+    transition: all 0.3s ease !important;
+    width: 100%;
+}
+div.stButton > button:first-child:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: 0 6px 12px rgba(0,0,0,0.2) !important;
+}
 
-/* ---------- 섹션 소제목 ---------- */
-.section-eyebrow {{
-    color: var(--gold);
-    font-size: 0.78rem;
-    font-weight: 700;
-    letter-spacing: 0.14em;
-    margin-bottom: -0.4rem;
-}}
-
-{extra_rules}
+/* 입력 필드 디자인 */
+.stTextInput>div>div>input {
+    border-radius: 8px !important;
+    border: 1px solid #cbd5e1 !important;
+}
+.stTextInput>div>div>input:focus {
+    border-color: #294435 !important;
+    box-shadow: 0 0 0 1px #294435 !important;
+}
+.stFileUploader>div>div {
+    border-radius: 12px !important;
+    border: 2px dashed #cbd5e1 !important;
+    background-color: rgba(255,255,255,0.5) !important;
+}
+@media (prefers-color-scheme: dark) {
+    .stFileUploader>div>div {
+        background-color: rgba(0,0,0,0.2) !important;
+        border-color: #475569 !important;
+    }
+}
 </style>
 """
+st.markdown(custom_css, unsafe_allow_html=True)
 
-st.markdown(build_custom_css(st.session_state.dark_mode), unsafe_allow_html=True)
 # -------------------------------------------------------------------------
-# [1] 스마트 PDF 및 제미나이 통신 함수
+# 상단 헤더 배너 (HTML) - 제작자 명시
+# -------------------------------------------------------------------------
+st.markdown("""
+<div class="hero-banner">
+    <div class="hero-badge">도개고등학교 - 김기섭</div>
+    <h1 class="hero-title">🎓 도개고 대입 모의면접 마스터 솔루션</h1>
+    <p class="hero-subtitle">생기부와 실제 대학 기출 형식을 정교하게 분석해, 실전과 같은 모의면접 세트를 설계합니다</p>
+    <div class="hero-line"></div>
+</div>
+""", unsafe_allow_html=True)
+
+# -------------------------------------------------------------------------
+# [1] 스마트 PDF 및 제미나이 통신 함수 (텍스트 및 오디오 404 방어)
 # -------------------------------------------------------------------------
 def extract_text_from_pdf(uploaded_file):
     doc = pymupdf.open(stream=uploaded_file.read(), filetype="pdf")
@@ -305,75 +205,82 @@ def extract_text_from_pdf(uploaded_file):
     for page in doc:
         full_text += page.get_text()
     return full_text
-GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-DEFAULT_MODEL_CANDIDATES = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-pro-latest"]
 
 def call_gemini(prompt, api_key):
-    api_key = (api_key or "").strip()
-    prompt = prompt.encode("utf-8", errors="ignore").decode("utf-8")
-
-    headers = {"Content-Type": "application/json"}
-    payload_bytes = json.dumps(
-        {"contents": [{"parts": [{"text": prompt}]}]}
-    ).encode("utf-8")
-
+    if isinstance(prompt, bytes):
+        prompt = prompt.decode('utf-8', errors='ignore')
+    elif not isinstance(prompt, str):
+        prompt = str(prompt)
+        
+    client = genai.Client(api_key=api_key)
+    
     available_models = []
     try:
-        list_resp = requests.get(
-            f"{GEMINI_API_BASE}/models",
-            params={"key": api_key},
-            headers=headers,
-            timeout=30,
-        )
-        if list_resp.ok:
-            for m in list_resp.json().get("models", []):
-                name = m.get("name", "").replace("models/", "")
-                methods = m.get("supportedGenerationMethods", [])
-                is_text_model = "generateContent" in methods if methods else True
-                if is_text_model and ("flash" in name or "pro" in name) and not any(
-                    bad in name for bad in ("embedding", "aqa", "imagen", "veo", "tts", "vision", "learnlm")
-                ):
-                    available_models.append(name)
-    except Exception:
-        available_models = []
-
-    models_to_try = sorted(set(available_models), key=lambda x: ("latest" not in x, "flash" not in x))
-    for fallback in DEFAULT_MODEL_CANDIDATES:
-        if fallback not in models_to_try:
-            models_to_try.append(fallback)
-
+        for m in client.models.list():
+            name = m.name.replace("models/", "") if m.name.startswith("models/") else m.name
+            if "gemini-1.5" in name or "gemini-flash" in name:
+                available_models.append(name)
+    except:
+        available_models = ["gemini-1.5-flash", "gemini-1.5-pro"]
+        
+    if not available_models:
+        available_models = ["gemini-1.5-flash-latest"]
+        
+    models_to_try = sorted(available_models, key=lambda x: "flash" not in x)
+    
     last_error = ""
-    for target_model in models_to_try[:4]:
+    for target_model in models_to_try[:3]:
         try:
-            url = f"{GEMINI_API_BASE}/models/{target_model}:generateContent"
-            resp = requests.post(
-                url,
-                params={"key": api_key},
-                headers=headers,
-                data=payload_bytes,
-                timeout=180,
-            )
-            if not resp.ok:
-                raise Exception(f"HTTP {resp.status_code} / {resp.text[:300]}")
-
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                block_reason = data.get("promptFeedback", {}).get("blockReason", "")
-                raise Exception(f"응답에 candidates가 없습니다 (blockReason: {block_reason or '없음'})")
-
-            parts = candidates[0].get("content", {}).get("parts", [])
-            text = "".join(p.get("text", "") for p in parts if "text" in p)
-            if not text:
-                raise Exception(f"응답 텍스트가 비어 있습니다: finishReason={candidates[0].get('finishReason')}")
-            return text
+            response = client.models.generate_content(model=target_model, contents=prompt)
+            return response.text
         except Exception as e:
-            last_error = f"[{target_model}] {type(e).__name__}: {e}"
-            time.sleep(2)
-
+            last_error = str(e)
+            time.sleep(2) 
+            
     raise Exception(f"AI 모델 통신 실패 (마지막 에러: {last_error})")
+
+def call_gemini_audio_eval(audio_bytes, api_key):
+    client = genai.Client(api_key=api_key)
+    prompt = """
+    당신은 도개고등학교의 날카롭고 전문적인 면접관입니다. 다음은 학생이 면접 질문에 대해 직접 스마트폰으로 녹음한 음성 답변입니다.
+    아래 3가지 항목을 반드시 포함하여 분석 및 평가 리포트를 작성해 주세요.
+    
+    1. 🗣️ **[답변 내용 변환 (STT)]**: 학생의 음성을 텍스트로 정확하게 받아적어 주세요.
+    2. 📊 **[면접관의 평가]**: 학생의 답변을 '논리성, 표현력, 전공적합성'을 기준으로 분석하고 종합 평가를 [상 / 중 / 하]로 매겨주세요. 구체적인 칭찬과 보완점(피드백)을 작성해 주세요.
+    3. 🔥 **[추가 압박 꼬리질문]**: 학생의 답변 내용 중 논리적 비약이 있거나 더 깊이 파고들 만한 날카로운 꼬리질문을 하나 던져주세요.
+    """
+    
+    available_models = []
+    try:
+        for m in client.models.list():
+            name = m.name.replace("models/", "") if m.name.startswith("models/") else m.name
+            if "gemini-1.5" in name or "gemini-flash" in name:
+                available_models.append(name)
+    except:
+        pass
+        
+    if not available_models:
+        available_models = ["gemini-1.5-flash-latest", "gemini-1.5-flash"]
+        
+    models_to_try = sorted(available_models, key=lambda x: "flash" not in x)
+    
+    last_error = ""
+    for target_model in models_to_try[:3]:
+        try:
+            audio_part = types.Part.from_bytes(data=audio_bytes, mime_type='audio/wav')
+            response = client.models.generate_content(
+                model=target_model,
+                contents=[audio_part, prompt]
+            )
+            return response.text
+        except Exception as e:
+            last_error = str(e)
+            time.sleep(2)
+            
+    return f"음성 분석 실패: {last_error}\n(API 키 설정이나 모델 상태를 확인해 주세요.)"
+
 # -------------------------------------------------------------------------
-# [2] 워드 표 생성 및 가독성/여백 최적화 엔진
+# [2] 워드 표 레이아웃 및 디자인 무너짐 완벽 방지 엔진
 # -------------------------------------------------------------------------
 def set_document_font(doc):
     style = doc.styles['Normal']
@@ -381,32 +288,46 @@ def set_document_font(doc):
     font.name = '맑은 고딕'
     font.size = Pt(11)
     style._element.rPr.rFonts.set(qn('w:eastAsia'), '맑은 고딕')
+
 def set_cell_background(cell, fill_color):
     tcPr = cell._tc.get_or_add_tcPr()
     shd = OxmlElement('w:shd')
     shd.set(qn('w:val'), 'clear')
     shd.set(qn('w:color'), 'auto')
-    shd.set(qn('w:fill'), fill_color)
+    shd.set(qn('w:fill'), fill_color) 
     tcPr.append(shd)
+
+def set_cell_margins(cell, top=140, bottom=140, left=200, right=200):
+    tcPr = cell._tc.get_or_add_tcPr()
+    tcMar = OxmlElement('w:tcMar')
+    for m, val in [('top', top), ('bottom', bottom), ('left', left), ('right', right)]:
+        node = OxmlElement(f'w:{m}')
+        node.set(qn('w:w'), str(val))
+        node.set(qn('w:type'), 'dxa')
+        tcMar.append(node)
+    tcPr.append(tcMar)
+
 def add_parsed_text_to_cell(cell, text):
+    set_cell_margins(cell)
     p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
     p.paragraph_format.line_spacing = 1.3
-    p.paragraph_format.space_before = Pt(8)
-    p.paragraph_format.space_after = Pt(8)
+    p.paragraph_format.space_before = Pt(4)
+    p.paragraph_format.space_after = Pt(4)
     parts = text.split("**")
     for i, part in enumerate(parts):
         run = p.add_run(part)
-        if i % 2 != 0:
+        if i % 2 != 0: 
             run.bold = True
             run.font.color.rgb = RGBColor(0, 51, 102)
+
 def add_intro_paragraphs(doc, text):
     for line in text.split('\n'):
         line = line.strip()
         if not line: continue
         p = doc.add_paragraph()
         p.paragraph_format.line_spacing = 1.3
-
-        if line.startswith("### 📄"):
+        
+        if line.startswith("### 📄") or line.startswith("### 📌") or line.startswith("### 🔍"):
             run = p.add_run(line)
             run.bold = True
             run.font.size = Pt(12)
@@ -416,142 +337,138 @@ def add_intro_paragraphs(doc, text):
             for i, part in enumerate(parts):
                 run = p.add_run(part)
                 if i % 2 != 0: run.bold = True
-def add_passage_block_to_doc(doc, block_text):
-    """### 📄 로 시작하는 '제시문' 블록을 워드 문서에 렌더링합니다 (학생/교사 공통 표시)."""
-    lines = block_text.strip().split('\n')
-    title = lines[0].replace('### 📄', '').strip()
-    body = "\n".join(lines[1:]).strip()
 
-    table = doc.add_table(rows=0, cols=1)
-    table.style = 'Table Grid'
-
-    row_title = table.add_row()
-    set_cell_background(row_title.cells[0], "FFF3D6")
-    add_parsed_text_to_cell(row_title.cells[0], f"📄 {title}")
-
-    row_body = table.add_row()
-    add_parsed_text_to_cell(row_body.cells[0], body if body else "내용 없음")
-
-    doc.add_paragraph()
-def add_question_block_to_doc(doc, block_text, is_teacher):
-    """### 📌 로 시작하는 '문항' 블록을 워드 문서에 렌더링합니다."""
-    lines = block_text.strip().split('\n')
-    title = lines[0].replace('### 📌', '').strip()
-    body = "\n".join(lines[1:])
-
-    q_match = re.search(r'\[질문\](.*?)(?=\[평가의도\]|\[모범답안\]|\[꼬리질문\]|$)', body, re.DOTALL)
-    i_match = re.search(r'\[평가의도\](.*?)(?=\[모범답안\]|\[꼬리질문\]|$)', body, re.DOTALL)
-    a_match = re.search(r'\[모범답안\](.*?)(?=\[꼬리질문\]|$)', body, re.DOTALL)
-    f_match = re.search(r'\[꼬리질문\](.*?)(?=$)', body, re.DOTALL)
-
-    q_text = q_match.group(1).strip() if q_match else "내용 없음"
-    i_text = i_match.group(1).strip() if i_match else ""
-    a_text = a_match.group(1).strip() if a_match else ""
-    f_text = f_match.group(1).strip() if f_match else ""
-
-    table = doc.add_table(rows=0, cols=1)
-    table.style = 'Table Grid'
-
-    row_title = table.add_row()
-    set_cell_background(row_title.cells[0], "EBF1FA")
-    add_parsed_text_to_cell(row_title.cells[0], f"📌 {title}")
-
-    row_q = table.add_row()
-    add_parsed_text_to_cell(row_q.cells[0], f"**[면접 질문]**\n{q_text}")
-
-    if is_teacher:
-        row_i = table.add_row()
-        set_cell_background(row_i.cells[0], "F9F9F9")
-        add_parsed_text_to_cell(row_i.cells[0], f"**[평가 의도]**\n{i_text}")
-
-        row_a = table.add_row()
-        add_parsed_text_to_cell(row_a.cells[0], f"**[모범 답안 가이드]**\n{a_text}")
-
-        row_f = table.add_row()
-        set_cell_background(row_f.cells[0], "FFF4F4")
-        add_parsed_text_to_cell(row_f.cells[0], f"**[압박용 꼬리질문]**\n{f_text}")
-
-    doc.add_paragraph()
-def add_source_block_to_doc(doc, block_text):
-    """### 📊 로 시작하는 '출제근거' 요약 블록(서울대 기출 문서 양식 참고)을 워드 문서에 렌더링합니다."""
-    lines = block_text.strip().split('\n')
-    title = lines[0].replace('### 📊', '').strip()
-    body = "\n".join(lines[1:])
-
-    u_match = re.search(r'\[활용모집단위\](.*?)(?=\[개념\]|\[교육과정출처\]|\[자료출처\]|$)', body, re.DOTALL)
-    c_match = re.search(r'\[개념\](.*?)(?=\[교육과정출처\]|\[자료출처\]|$)', body, re.DOTALL)
-    s_match = re.search(r'\[교육과정출처\](.*?)(?=\[자료출처\]|$)', body, re.DOTALL)
-    r_match = re.search(r'\[자료출처\](.*?)(?=$)', body, re.DOTALL)
-
-    u_text = u_match.group(1).strip() if u_match else ""
-    c_text = c_match.group(1).strip() if c_match else ""
-    s_text = s_match.group(1).strip() if s_match else ""
-    r_text = r_match.group(1).strip() if r_match else ""
-
-    table = doc.add_table(rows=0, cols=1)
-    table.style = 'Table Grid'
-
-    row_title = table.add_row()
-    set_cell_background(row_title.cells[0], "EAF6EC")
-    add_parsed_text_to_cell(row_title.cells[0], f"📊 {title} (서울대 기출 문서 양식 참고 · 교사 참고용)")
-
-    row_u = table.add_row()
-    add_parsed_text_to_cell(row_u.cells[0], f"**[활용 모집단위]**\n{u_text}")
-
-    row_c = table.add_row()
-    set_cell_background(row_c.cells[0], "F9F9F9")
-    add_parsed_text_to_cell(row_c.cells[0], f"**[핵심 개념]**\n{c_text}")
-
-    row_s = table.add_row()
-    add_parsed_text_to_cell(row_s.cells[0], f"**[교육과정 출처]**\n{s_text}")
-
-    row_r = table.add_row()
-    set_cell_background(row_r.cells[0], "F9F9F9")
-    add_parsed_text_to_cell(row_r.cells[0], f"**[참고 자료출처]**\n{r_text}")
-
-    doc.add_paragraph()
 def create_word_files(content, student_name, interview_type, target_desc):
     type_label = "생기부면접" if "생기부" in interview_type else "제시문면접"
-
+    is_jesimun = "제시문" in interview_type
+    
     doc_student = Document()
     doc_teacher = Document()
-
-    sections = re.split(r'(?=### 📄|### 📌|### 📊)', content)
-
+    
     for doc, is_teacher in [(doc_student, False), (doc_teacher, True)]:
         set_document_font(doc)
         title_text = f"🎓 [{student_name}] {target_desc} 도개고 맞춤 모의면접 {'지침서 (교사용)' if is_teacher else '워크북 (학생용)'}"
         doc.add_heading(title_text, level=1)
         doc.add_paragraph(f"[{type_label}] 본 문서는 도개고등학교 진로진학 지도 기준에 맞춰 생성되었습니다.\n")
+        
+        briefing_match = re.search(r'(### 🔍 \[생기부 심층 분석 브리핑 리포트\].*?)(?=### 📌|### 📄|$)', content, re.DOTALL)
+        if briefing_match:
+            add_intro_paragraphs(doc, briefing_match.group(1).strip())
+            doc.add_paragraph()
 
-        for section in sections:
-            section = section.strip('\n')
-            if not section.strip():
-                continue
-            if section.strip().startswith('### 📄'):
-                add_passage_block_to_doc(doc, section)
-            elif section.strip().startswith('### 📌'):
-                add_question_block_to_doc(doc, section, is_teacher)
-            elif section.strip().startswith('### 📊'):
+        blocks = content.split('### 📌')
+        for block in blocks[1:]:
+            lines = block.strip().split('\n')
+            if not lines: continue
+            
+            title = lines[0].strip()
+            body = "\n".join(lines[1:])
+            
+            table = doc.add_table(rows=0, cols=1)
+            table.style = 'Table Grid' 
+            
+            for row in table.rows:
+                trPr = row._tr.get_or_add_trPr()
+                trPr.append(OxmlElement('w:cantSplit'))
+            
+            row_title = table.add_row()
+            cell_title = row_title.cells[0]
+            set_cell_background(cell_title, "EBF1FA")
+            add_parsed_text_to_cell(cell_title, f"📌 {title}")
+            
+            if is_jesimun:
+                js_match = re.search(r'\[제시문\](.*?)(?=\[문제 1\]|$)', body, re.DOTALL)
+                q1_match = re.search(r'\[문제 1\](.*?)(?=\[평가의도 1\]|\[문제 2\]|$)', body, re.DOTALL)
+                i1_match = re.search(r'\[평가의도 1\](.*?)(?=\[모범답안 1\]|$)', body, re.DOTALL)
+                a1_match = re.search(r'\[모범답안 1\](.*?)(?=\[꼬리질문 1\]|$)', body, re.DOTALL)
+                f1_match = re.search(r'\[꼬리질문 1\](.*?)(?=\[문제 2\]|$)', body, re.DOTALL)
+                
+                q2_match = re.search(r'\[문제 2\](.*?)(?=\[평가의도 2\]|$)', body, re.DOTALL)
+                i2_match = re.search(r'\[평가의도 2\](.*?)(?=\[모범답안 2\]|$)', body, re.DOTALL)
+                a2_match = re.search(r'\[모범답안 2\](.*?)(?=\[꼬리질문 2\]|$)', body, re.DOTALL)
+                f2_match = re.search(r'\[꼬리질문 2\](.*?)(?=$)', body, re.DOTALL)
+                
+                js_text = js_match.group(1).strip() if js_match else ""
+                q1_text = q1_match.group(1).strip() if q1_match else ""
+                i1_text = i1_match.group(1).strip() if i1_match else ""
+                a1_text = a1_match.group(1).strip() if a1_match else ""
+                f1_text = f1_match.group(1).strip() if f1_match else ""
+                
+                q2_text = q2_match.group(1).strip() if q2_match else ""
+                i2_text = i2_match.group(1).strip() if i2_match else ""
+                a2_text = a2_match.group(1).strip() if a2_match else ""
+                f2_text = f2_match.group(1).strip() if f2_match else ""
+                
+                if js_text:
+                    row_js = table.add_row()
+                    set_cell_background(row_js.cells[0], "F4F6F9")
+                    add_parsed_text_to_cell(row_js.cells[0], f"**[서울대 스타일 구술 제시문 (가, 나, 다)]**\n{js_text}")
+                
+                row_q1 = table.add_row()
+                add_parsed_text_to_cell(row_q1.cells[0], f"**[문제 1]**\n{q1_text}")
                 if is_teacher:
-                    add_source_block_to_doc(doc, section)
+                    row_i1 = table.add_row()
+                    set_cell_background(row_i1.cells[0], "F9F9F9")
+                    add_parsed_text_to_cell(row_i1.cells[0], f"**[평가 의도 1]**\n{i1_text}")
+                    row_a1 = table.add_row()
+                    add_parsed_text_to_cell(row_a1.cells[0], f"**[모범 답안 가이드 1]**\n{a1_text}")
+                    row_f1 = table.add_row()
+                    set_cell_background(row_f1.cells[0], "FFF4F4")
+                    add_parsed_text_to_cell(row_f1.cells[0], f"**[압박용 꼬리질문 1]**\n{f1_text}")
+                
+                if q2_text:
+                    row_q2 = table.add_row()
+                    add_parsed_text_to_cell(row_q2.cells[0], f"**[문제 2]**\n{q2_text}")
+                    if is_teacher:
+                        row_i2 = table.add_row()
+                        set_cell_background(row_i2.cells[0], "F9F9F9")
+                        add_parsed_text_to_cell(row_i2.cells[0], f"**[평가 의도 2]**\n{i2_text}")
+                        row_a2 = table.add_row()
+                        add_parsed_text_to_cell(row_a2.cells[0], f"**[모범 답안 가이드 2]**\n{a2_text}")
+                        row_f2 = table.add_row()
+                        set_cell_background(row_f2.cells[0], "FFF4F4")
+                        add_parsed_text_to_cell(row_f2.cells[0], f"**[압박용 꼬리질문 2]**\n{f2_text}")
             else:
-                add_intro_paragraphs(doc, section.strip())
-                doc.add_paragraph()
+                q_match = re.search(r'\[질문\](.*?)(?=\[평가의도\]|\[모범답안\]|\[꼬리질문\]|$)', body, re.DOTALL)
+                i_match = re.search(r'\[평가의도\](.*?)(?=\[모범답안\]|\[꼬리질문\]|$)', body, re.DOTALL)
+                a_match = re.search(r'\[모범답안\](.*?)(?=\[꼬리질문\]|$)', body, re.DOTALL)
+                f_match = re.search(r'\[꼬리질문\](.*?)(?=$)', body, re.DOTALL)
+                
+                q_text = q_match.group(1).strip() if q_match else "내용 없음"
+                i_text = i_match.group(1).strip() if i_match else ""
+                a_text = a_match.group(1).strip() if a_match else ""
+                f_text = f_match.group(1).strip() if f_match else ""
+                
+                row_q = table.add_row()
+                add_parsed_text_to_cell(row_q.cells[0], f"**[면접 질문]**\n{q_text}")
+                
+                if is_teacher:
+                    row_i = table.add_row()
+                    set_cell_background(row_i.cells[0], "F9F9F9")
+                    add_parsed_text_to_cell(row_i.cells[0], f"**[평가 의도]**\n{i_text}")
+                    row_a = table.add_row()
+                    add_parsed_text_to_cell(row_a.cells[0], f"**[모범 답안 가이드]**\n{a_text}")
+                    row_f = table.add_row()
+                    set_cell_background(row_f.cells[0], "FFF4F4")
+                    add_parsed_text_to_cell(row_f.cells[0], f"**[압박용 꼬리질문]**\n{f_text}")
+            
+            doc.add_paragraph() 
 
     student_path = f"{student_name}_{target_desc}_{type_label}_학생용.docx"
     teacher_path = f"{student_name}_{target_desc}_{type_label}_교사용.docx"
     doc_student.save(student_path)
     doc_teacher.save(teacher_path)
+
     return student_path, teacher_path
+
 def create_chat_history_word(chat_history, student_name):
     doc = Document()
     set_document_font(doc)
     doc.add_heading(f"💬 [{student_name}] 면접 문항 피드백 대화 내역", level=1)
     doc.add_paragraph("AI 출제위원과의 피드백 기록입니다.\n" + "="*50)
-
+    
     for msg in chat_history:
-        role_title = "👤 선생님 (요청)" if msg["role"] == "user" else "🤖 AI 출제위원 (답변/수정본)"
+        role_title = "👤 선생님/학생 (요청)" if msg["role"] == "user" else "🤖 AI 출제위원 (답변/평가)"
         doc.add_heading(role_title, level=2)
         p = doc.add_paragraph()
         p.paragraph_format.line_spacing = 1.3
@@ -560,32 +477,28 @@ def create_chat_history_word(chat_history, student_name):
             run = p.add_run(part)
             if i % 2 != 0: run.bold = True
         doc.add_paragraph("-" * 50)
+
     file_path = f"{student_name}_피드백_대화내역.docx"
     doc.save(file_path)
     return file_path
+
 # -------------------------------------------------------------------------
-# [3] 메인 UI
+# [3] 메인 UI 
 # -------------------------------------------------------------------------
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "word_files" not in st.session_state:
     st.session_state.word_files = None
-if "raw_content" not in st.session_state:
-    st.session_state.raw_content = ""
-st.markdown("""
-<div class="hero-banner">
-    <div class="hero-badge">DOGAE HIGH SCHOOL · 진로진학부</div>
-    <div class="hero-title">🎓 도개고 대입 모의면접 마스터 솔루션</div>
-    <p class="hero-subtitle">생기부와 실제 대학 기출 형식을 정교하게 분석해, 실전과 같은 모의면접 세트를 설계합니다</p>
-    <div class="hero-divider"></div>
-</div>
-""", unsafe_allow_html=True)
-with st.expander("📖 프로그램 사용 설명서 및 PDF OCR 변환 방법", expanded=False):
+if "last_audio_size" not in st.session_state:
+    st.session_state.last_audio_size = 0
+
+with st.expander("📖 [클릭] 프로그램 사용 설명서 및 PDF OCR 변환 방법", expanded=False):
     st.markdown("""
     ### 🔑 Google Gemini API 키 발급 방법
     1. **Google AI Studio 접속:** [Google AI Studio](https://aistudio.google.com/)에 접속합니다.
     2. **구글 계정 로그인:** 평소 사용하는 구글 계정으로 로그인합니다.
     3. **API 키 생성:** 좌측 상단 'Get API key' 버튼을 클릭하여 키 생성 후 복사합니다.
+
     ### 📂 [중요] 생기부 PDF는 반드시 '텍스트 추출(OCR)'된 파일이어야 합니다!
     * **왜 필요한가요?** 단순 이미지(스캔본) PDF는 AI가 글자를 읽지 못하므로, **마우스로 글자가 드래그되거나 텍스트로 인식되는 PDF**여야만 정상 분석이 가능합니다.
     * **스캔된 PDF를 OCR(텍스트형)로 변환하는 방법:**
@@ -593,23 +506,22 @@ with st.expander("📖 프로그램 사용 설명서 및 PDF OCR 변환 방법",
          - 스캔된 생기부 PDF 파일을 구글 드라이브에 업로드합니다.
          - 업로드된 파일 우클릭 ➔ **[연결 앱]** ➔ **[Google 문서]**를 선택하여 엽니다.
          - 구글 문서로 열리면 이미지가 텍스트로 자동 변환됩니다. 상단 메뉴 **[파일] ➔ [다운로드] ➔ [Microsoft Word(.docx)]** 또는 PDF로 저장합니다.
-      2. **온라인 무료 툴 활용:**
-         - 'ILOVEPDF' 또는 'Smallpdf' 등의 사이트에서 **'OCR PDF(PDF 텍스트 변환)'** 메뉴를 이용해 변환합니다.
-    ### 💡 프로그램 사용 순서
-    1. 왼쪽 사이드바에 API 키를 입력합니다.
-    2. 면접 방식(생기부 기반/제시문 기반)을 선택합니다.
-    3. 대학, 학과, 난이도를 설정합니다.
-    4. 생기부 면접일 경우 **OCR 변환된 PDF**를 업로드하고 생성 버튼을 누릅니다.
+      2. **온라인 무료 툴 활용:** 'ILOVEPDF' 등의 사이트에서 'OCR PDF' 메뉴를 이용해 변환합니다.
+
+    ### 🎙️ [신규] 휴대폰 음성 인식(STT) 면접 평가 기능 사용법!
+    * **1단계 (키보드 활용):** 휴대폰으로 접속 시, 하단 채팅창을 누른 후 **휴대폰 키보드에 있는 '마이크(🎤)' 버튼**을 누르고 말하면 텍스트로 바로 입력됩니다.
+    * **2단계 (무인 AI 면접관 모드):** 하단의 **[🎙️ 음성으로 면접 답변하기]** 버튼을 눌러 직접 녹음해 보세요. AI가 음성을 듣고 즉각적인 평가와 꼬리질문을 던져줍니다!
     """)
+
 with st.sidebar:
     api_key = st.text_input("🔑 Gemini API Key", type="password")
+
 UNIVERSITIES = {
-    "서울권": ["서울대", "연세대", "고려대", "성균관대", "서강대", "한양대", "중앙대", "경희대", "한국외대", "서울시립대", "이화여대"],
-    "충청권": ["카이스트(KAIST)", "충남대", "충북대", "고려대(세종)"],
+    "서울권": ["서울대", "연세대", "고려대", "성균관대", "서강대", "한양대", "중앙대", "경희대", "한국외대", "서울시립대", "이화여대"], 
+    "충청권": ["카이스트(KAIST)", "충남대", "충북대", "고려대(세종)"], 
     "경상권": ["경북대", "부산대", "UNIST", "영남대", "계명대"]
 }
-st.markdown('<p class="section-eyebrow">STEP 1 · 면접 조건 설정</p>', unsafe_allow_html=True)
-st.markdown("### 면접 세부 조건")
+
 col1, col2 = st.columns(2)
 with col1:
     interview_type = st.radio("🎯 면접 방식", ["생기부 기반 면접", "상위권 대학 제시문 기반 면접"], horizontal=True)
@@ -618,19 +530,29 @@ with col1:
         uni = st.text_input("🏫 대학 직접 입력", value="한국대")
     else:
         uni = st.selectbox("🏫 대학 선택", UNIVERSITIES[region])
+
 with col2:
     major = st.text_input("🎓 지원 학과/전공", placeholder="예: 철학과")
     student_name = st.text_input("👤 지원자 성명", value="김기섭")
     difficulty = st.radio("⚙️ 난이도 선택", ["하 (기초)", "중 (표준)", "상 (압박)"], horizontal=True, index=1)
+
 uploaded_file = None
 if interview_type == "생기부 기반 면접":
     uploaded_file = st.file_uploader("📂 학생 생기부 PDF 업로드 (OCR 변환 필수)", type=["pdf"])
+
 st.markdown("---")
+
 # -------------------------------------------------------------------------
 # [4] 생성 버튼 로직
 # -------------------------------------------------------------------------
-target_desc = f"{uni}_{major}"
+target_desc = f"{uni}_{major}" 
+
 TEMPLATE_SANGBU = """
+### 🔍 [생기부 심층 분석 브리핑 리포트]
+- **지원자 강점 분석:** (여기에 작성)
+- **보완점 및 약점 분석:** (여기에 작성)
+- **면접관 집중 공략 포인트 (심화 탐구 상기):** (여기에 작성)
+
 ### 📌 [영역: OOO] **[과목명/활동명]**
 [질문]
 (내용 작성)
@@ -641,186 +563,137 @@ TEMPLATE_SANGBU = """
 [꼬리질문]
 (내용 작성)
 """
+
 TEMPLATE_JESIMUN = """
-### 📄 [세트 1] **[분류: 인문학 등 학과에 맞는 계열 1개 선택]**
-(가) (서울대 기출처럼 정의-원리-예시 흐름을 가진 압축적·개념적 지문 4~6문장, 학술적 문어체)
-(나) (가)와 대비되거나 보완되는 별도 관점의 지문 4~6문장)
-(다) (필요한 경우에만 추가. 불필요하면 이 줄 자체를 생략)
-### 📌 [세트1-문제1]
-[질문]
-[문제 1] (가)와 (나)의 관점을 비교·분석하거나 하나의 입장에서 다른 하나를 비판하도록 요구하는 질문
-[평가의도]
-(이 문제로 평가하려는 분석적·비판적 사고력을 구체적으로 서술)
-[모범답안]
-(핵심 논리 흐름을 담은 모범 답안 가이드 + 학생이 막혔을 때 면접관이 줄 수 있는 힌트 1가지)
-[꼬리질문]
-(1단계: 답변을 더 이끌어내는 꼬리질문 / 2단계: 학생의 논리·가정에 대한 반론을 제기하는 심화 꼬리질문)
-### 📌 [세트1-문제2]
-[질문]
-[문제 2] (가), (나)(, (다))의 유기적 관계를 종합하거나 새로운 상황에 적용·확장하도록 요구하는 질문
-[평가의도]
+### 📌 [세트 1] **[학술 및 전공 딜레마 주제 1]**
+[제시문]
+(여기에 서울대 구술고사 스타일의 다중 제시문 (가), (나), (다) 작성)
+[문제 1]
+(문제 1 내용)
+[평가의도 1]
 (내용 작성)
-[모범답안]
+[모범답안 1]
 (내용 작성)
-[꼬리질문]
-(1단계 / 2단계 구조로 내용 작성)
-### 📊 [세트 1 출제근거]
-[활용모집단위]
-(이 세트가 어울리는 모집단위 예시 2~3개, 지원 학과 포함)
-[개념]
-(핵심 개념 키워드 3~5개, 쉼표로 구분)
-[교육과정출처]
-(관련 과목·단원명 1~3개)
-[자료출처]
-(참고할 만한 문헌/자료 예시 1~2개)
-### 📄 [세트 2] **[분류: 세트 1과 다른 계열 1개 선택]**
-(가) (지문 4~6문장)
-(나) (지문 4~6문장)
-### 📌 [세트2-문제1]
-[질문]
+[꼬리질문 1]
 (내용 작성)
-[평가의도]
+[문제 2]
+(문제 2 내용)
+[평가의도 2]
 (내용 작성)
-[모범답안]
+[모범답안 2]
 (내용 작성)
-[꼬리질문]
-(1단계 / 2단계 구조로 내용 작성)
-### 📌 [세트2-문제2]
-[질문]
+[꼬리질문 2]
 (내용 작성)
-[평가의도]
+
+### 📌 [세트 2] **[학술 및 전공 딜레마 주제 2]**
+[제시문]
+(여기에 서울대 구술고사 스타일의 다중 제시문 (가), (나), (다) 작성)
+[문제 1]
+(문제 1 내용)
+[평가의도 1]
 (내용 작성)
-[모범답안]
+[모범답안 1]
 (내용 작성)
-[꼬리질문]
-(1단계 / 2단계 구조로 내용 작성)
-### 📊 [세트 2 출제근거]
-[활용모집단위]
+[꼬리질문 1]
 (내용 작성)
-[개념]
+[문제 2]
+(문제 2 내용)
+[평가의도 2]
 (내용 작성)
-[교육과정출처]
+[모범답안 2]
 (내용 작성)
-[자료출처]
+[꼬리질문 2]
 (내용 작성)
-### 📄 [세트 3] **[분류: 세트 1·2와 다른 계열 1개 선택]**
-(가) (지문 4~6문장)
-(나) (지문 4~6문장)
-### 📌 [세트3-문제1]
-[질문]
+
+### 📌 [세트 3] **[학술 및 전공 딜레마 주제 3]**
+[제시문]
+(여기에 서울대 구술고사 스타일의 다중 제시문 (가), (나), (다) 작성)
+[문제 1]
+(문제 1 내용)
+[평가의도 1]
 (내용 작성)
-[평가의도]
+[모범답안 1]
 (내용 작성)
-[모범답안]
+[꼬리질문 1]
 (내용 작성)
-[꼬리질문]
-(1단계 / 2단계 구조로 내용 작성)
-### 📌 [세트3-문제2]
-[질문]
+[문제 2]
+(문제 2 내용)
+[평가의도 2]
 (내용 작성)
-[평가의도]
+[모범답안 2]
 (내용 작성)
-[모범답안]
-(내용 작성)
-[꼬리질문]
-(1단계 / 2단계 구조로 내용 작성)
-### 📊 [세트 3 출제근거]
-[활용모집단위]
-(내용 작성)
-[개념]
-(내용 작성)
-[교육과정출처]
-(내용 작성)
-[자료출처]
+[꼬리질문 2]
 (내용 작성)
 """
+
 if st.button("🚀 면접 패키지 생성 시작"):
     if not api_key: st.error("API 키를 입력해 주세요."); st.stop()
     if not major: st.error("지원 학과를 입력해 주세요."); st.stop()
     if interview_type == "생기부 기반 면접" and not uploaded_file: st.error("생기부 파일을 업로드해 주세요."); st.stop()
-
+        
     student_record = extract_text_from_pdf(uploaded_file) if uploaded_file else ""
-
+    
     if interview_type == "생기부 기반 면접":
         prompt = f"""
-        당신은 도개고등학교의 진학 지도 노하우와 {uni} {major} 입학사정관의 시각을 겸비한 최고급 면접 출제위원입니다.
-        지원자 '{student_name}' 학생의 생기부를 분석하여 도개고 선배들이 실제 상위권/지역거점 대학 면접에서 마주했던 수준 높은 기출 문항들의 난이도와 깊이를 반영해 질문을 만드세요[cite: 3, 4].
-        면접 난이도: {difficulty}
-
-        [실제 합격 선배들의 증언 기반 출제 가이드]
-        서울대학교 합격 선배들의 후기에 따르면 학생부(학교생활기록부) 기반 면접은 다음과 같은 특징을 보입니다. 이를 최대한 반영해 질문을 설계하세요.
-        - 활동/동아리명 등에 들어간 핵심 용어 자체의 정의·한계·실제 활용 사례를 직접 캐묻는 질문이 자주 나옵니다.
-        - 탐구에 활용한 책이나 이론의 한계점, 혹은 다루지 않은 유사 사례·제도와의 비교를 요구하며 탐구의 총체성과 깊이를 점검합니다.
-        - 단순히 "무엇을 했는가"가 아니라 "왜 그 방법을 사용했는가", "그 결과로 새롭게 알게 된 것은 무엇인가", "더 깊이 탐구했다면 무엇을 추가로 다뤘어야 했는가"를 묻습니다.
-        - 정답 자체보다 학생이 당황스러운 질문에도 자신의 논리로 풀어내는 사고 과정과 진정성을 확인하려 합니다.
-
+        당신은 도개고등학교의 진학 지도 노하우와 {uni} {major} 입학사정관의 시각을 겸비한 최고급 면접 출제위원입니다. 
+        지원자 '{student_name}' 학생의 생기부를 면밀히 분석하여 다음 작업을 수행하세요.
+        
         [지시사항]
-        1. 생기부 5대 영역(1. 교과세특, 2. 창체, 3. 동아리, 4. 행특, 5. 독서/기타)을 모두 뒤져서 총 5세트를 만드세요.
-        2. 과목명이나 주요 활동명은 반드시 **[생활과 윤리]** 처럼 볼드체로 묶어주세요.
-        3. 단순 암기식 질문이 아니라 학생부 활동의 진위 여부, 동기, 심화 탐구 과정, 실생활 적용력을 파악하는 도개고 스타일의 날카로운 꼬리질문을 포함하세요[cite: 3, 4]. 특히 위 가이드처럼 활동 속 핵심 개념·용어의 정의/한계/활용 사례를 직접 캐묻는 꼬리질문을 최소 2세트 이상에 포함하세요.
-
+        1. **출력의 맨 첫 부분**에 반드시 **[생기부 심층 분석 브리핑 리포트]**를 작성하여 학생의 **강점, 단점(보완점), 그리고 면접관이 예리하게 파고들 수 있는 심화탐구 활동 부분**을 상세히 짚어주어 학생이 면접 전 반드시 상기할 수 있도록 하세요.
+        2. 생기부 5대 영역(교과세특, 창체, 동아리, 행특, 독서 등)을 모두 분석하여 총 5세트의 면접 문항을 만드세요.
+        3. 과목명이나 주요 활동명은 반드시 **[생활과 윤리]** 처럼 볼드체로 묶어주고 도개고 기출 수준의 날카로운 꼬리질문을 포함하세요.
+        
         [출력 템플릿 엄수 - 파싱을 위해 키워드 대괄호를 절대 변경하지 마세요]
         {TEMPLATE_SANGBU}
-
+        
         [생기부 내용]
         {student_record}
         """
-    else:
+    else: 
         prompt = f"""
-        당신은 서울대학교를 비롯한 상위권 대학의 실제 제시문 면접(구술고사) 출제 방식을 정확히 이해하고 있는, 도개고등학교 진학 지도 기준에 맞춘 제시문 면접 출제위원입니다.
-        {major} 전공적합성과 논리력을 평가하기 위한 고난도 제시문 기반 면접을 출제하세요.
+        당신은 서울대학교 면접 및 구술고사 출제위원입니다. {major} 전공적합성과 종합적 사고력, 논리적 추론 능력을 평가하기 위한 고난도 제시문 기반 구술고사를 출제하세요.
         면접 난이도: {difficulty}
-
-        [실제 서울대학교 기출 문서 형식 참고]
-        아래는 실제 "2026학년도 대학 신입학생 수시모집 일반전형 면접 및 구술고사 문항" 자료의 형식입니다. 반드시 이 형식과 문체를 참고하여 출제하세요.
-        - 제시문은 (가), (나)(, 필요시 (다))처럼 문자로 구분된 여러 개의 독립적 지문으로 구성되며, 각 지문은 정의-원리-예시의 흐름을 가진 압축적이고 개념적인 문단(4~6문장)입니다. 구어체나 쉬운 설명이 아니라 학술적 문어체를 사용하세요.
-        - 지문 아래에는 [문제 1], [문제 2]처럼 큰 문항이 제시되고, 각 문항은 "(가)와 (나)의 관점 중 하나를 선택하여 다른 하나를 비판하시오", "(가), (나), (다)의 유기적 관계를 파악하여 이 주장을 뒷받침하시오"처럼 제시문 간의 비교·통합·적용을 요구합니다.
-        - 실제 문서에는 문항마다 [활용 모집단위], [문항해설], [출제의도], [교육과정 출제근거([개념]/[출처])], [자료출처] 정보가 표로 함께 제공됩니다. 이를 참고해 각 세트 끝에 출제근거 요약을 포함하세요.
-
-        [선배들의 실제 면접 경험 기반 출제 가이드]
-        - 같은 제시문에 대해 보통 1단계 꼬리질문은 학생의 답변을 더 이끌어내는 방향이고, 2단계 꼬리질문은 학생이 가정한 상황에 대한 반론이나 논리의 허점을 짚는 심화형 질문입니다. 이 2단계 구조를 꼬리질문에 반영하세요.
-        - 서울대 제시문 면접은 정답 자체보다 논리적으로 사고를 전개하는 과정을 평가합니다. 모범답안에는 정답뿐 아니라 "학생이 막혔을 때 면접관이 줄 수 있는 힌트"도 함께 제시하세요.
-
+        
         [지시사항]
-        1. 생기부 내용은 무시하세요. {major} 학과와 관련된 고난도 딜레마 상황이나 철학적/학술적 주제가 담긴 제시문을 위 실제 기출 형식에 맞춰 창작하세요[cite: 3, 4].
-        2. **'제시문 세트(가·나 지문 포함) 1개 + 문제 2개'를 1세트로 구성**하여, 서로 다른 주제/계열(예: 인문학, 사회과학, 수학, 과학 등)의 세트 3개(총 3세트, 문제 6개)를 만드세요.
-           즉 [세트 1] → [문제 1][문제 2], [세트 2] → [문제 1][문제 2], [세트 3] → [문제 1][문제 2] 구조를 반드시 지키세요.
-        3. 같은 세트 안의 두 문제는 서로 다른 각도(예: 비교·비판 vs 종합·적용)에서 접근하도록 설계하세요.
-        4. 각 세트 마지막에는 실제 기출 문서처럼 [활용모집단위], [개념], [교육과정출처], [자료출처]를 요약한 출제근거 블록을 반드시 포함하세요.
-        5. 서론이나 인사말은 절대 쓰지 말고, 바로 '### 📄 [세트 1]' 부터 출력하세요.
-
+        1. 생기부 내용은 무시하세요. {major} 학과와 관련된 학술적 딜레마와 심층 개념을 담은 **완전 독립된 3개의 주제 세트**를 창작하세요.
+        2. **각 세트마다 복수의 제시문((가), (나), (다) 형태)과 [문제 1], [문제 2] (각각 평가의도, 모범답안, 압박 꼬리질문 포함)**가 유기적으로 묶인 **총 3개의 독립 세트**를 엄격히 만드세요.
+        3. 서론이나 인사말은 절대 쓰지 말고, 바로 '### 📌 [세트 1]' 부터 출력하세요.
+        
         [출력 템플릿 엄수 - 파싱을 위해 키워드 대괄호를 절대 변경하지 마세요]
         {TEMPLATE_JESIMUN}
         """
-
-    with st.spinner(f"⏳ 로딩중... 도개고 면접 기출 수준에 맞춰 {interview_type} 문항을 조립하고 있습니다."):
+    
+    with st.spinner(f"⏳ 로딩중... 생기부 분석 브리핑 및 면접 문항을 정밀 조립하고 있습니다."):
         try:
             result_text = call_gemini(prompt, api_key)
-            st.session_state.raw_content = result_text
-
+            
             stu_path, tea_path = create_word_files(result_text, student_name, interview_type, target_desc)
             st.session_state.word_files = (stu_path, tea_path)
-
-            display_text = result_text.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n').replace('[활용모집단위]', '\n**🏫 [활용 모집단위]**\n').replace('[개념]', '\n**🔑 [핵심 개념]**\n').replace('[교육과정출처]', '\n**📚 [교육과정 출처]**\n').replace('[자료출처]', '\n**📖 [참고 자료출처]**\n')
-
-            full_display_text = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)\n\n➕ 문항이 더 필요하시면 **'더 만들어줘'** 처럼 요청해 주세요. 요청 시 기존 내용은 그대로 유지한 채 **최소 2세트가 추가**됩니다."
-
+            
+            display_text = result_text.replace('[문제 1]', '\n**💡 [문제 1]**\n').replace('[평가의도 1]', '\n**🎯 [평가 의도 1]**\n').replace('[모범답안 1]', '\n**✅ [모범 답안 가이드 1]**\n').replace('[꼬리질문 1]', '\n**🔥 [압박용 꼬리질문 1]**\n')
+            display_text = display_text.replace('[문제 2]', '\n**💡 [문제 2]**\n').replace('[평가의도 2]', '\n**🎯 [평가 의도 2]**\n').replace('[모범답안 2]', '\n**✅ [모범 답안 가이드 2]**\n').replace('[꼬리질문 2]', '\n**🔥 [압박용 꼬리질문 2]**\n')
+            display_text = display_text.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n')
+            display_text = display_text.replace('[제시문]', '\n**📄 [서울대 스타일 구술 제시문 (가, 나, 다)]**\n')
+            
+            full_display_text = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)"
+            
             st.session_state.chat_history = [{"role": "assistant", "content": full_display_text}]
-            st.success("🎉 도개고 맞춤형 면접 패키지 및 워드 문서 생성이 완료되었습니다!")
-
+            st.success("🎉 면접 패키지 및 워드 문서 생성이 완료되었습니다!")
+            
         except Exception as e:
             st.error(f"❌ 생성 실패: {e}")
+
 # -------------------------------------------------------------------------
-# [5] 결과 대시보드
+# [5] 결과 대시보드 및 실시간 피드백
 # -------------------------------------------------------------------------
 if st.session_state.chat_history:
-    st.markdown('<p class="section-eyebrow">STEP 2 · 결과 확인 및 피드백</p>', unsafe_allow_html=True)
+    st.markdown("<div class='step-text'>STEP 2 · 결과 확인 및 피드백</div>", unsafe_allow_html=True)
     st.markdown("## 📋 면접 문항 대시보드 및 실시간 피드백")
-
+    
     if st.session_state.word_files:
         stu_path, tea_path = st.session_state.word_files
         chat_path = create_chat_history_word(st.session_state.chat_history, student_name)
-
+        
         col_w1, col_w2, col_w3 = st.columns(3)
         with col_w1:
             with open(stu_path, "rb") as f:
@@ -831,29 +704,43 @@ if st.session_state.chat_history:
         with col_w3:
             with open(chat_path, "rb") as f:
                 st.download_button("💬 피드백 대화 내역 (.docx)", f, file_name=chat_path, use_container_width=True)
-
+    
     st.divider()
-
+    
     for message in st.session_state.chat_history:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+            
+    st.markdown("💡 **Tip:** 아래 채팅창에서 📱휴대폰 키보드 마이크(🎤)를 눌러 말하거나, 우측 🎙️ 녹음 버튼을 활용해 보세요!")
+    
+    audio_value = st.audio_input("🎙️ 음성으로 면접 답변하기 (녹음 버튼을 누르고 답변을 말해보세요!)")
+    
+    if audio_value is not None:
+        if st.session_state.last_audio_size != audio_value.size:
+            if not api_key:
+                st.error("API 키를 입력해 주세요.")
+            else:
+                with st.spinner("AI 면접관이 학생의 음성을 분석하고 답변을 평가 중입니다..."):
+                    audio_bytes = audio_value.read()
+                    eval_result = call_gemini_audio_eval(audio_bytes, api_key)
+                    
+                    st.session_state.chat_history.append({"role": "user", "content": "[🎙️ 음성 답변 제출 완료]"})
+                    st.session_state.chat_history.append({"role": "assistant", "content": eval_result})
+                    
+                    st.session_state.last_audio_size = audio_value.size
+                    st.rerun()
 
-    if user_feedback := st.chat_input("질문을 더 어렵게 하거나 특정 활동을 추가해 달라고 피드백을 남겨보세요. ('더 만들어줘'라고 하면 세트가 추가됩니다)"):
+    if user_feedback := st.chat_input("질문을 더 어렵게 하거나 답변을 입력해보세요 (키보드 마이크🎤 활용 가능)"):
         st.session_state.chat_history.append({"role": "user", "content": user_feedback})
         with st.chat_message("user"):
             st.markdown(user_feedback)
-
+            
         with st.chat_message("assistant"):
-            with st.spinner("요청하신 피드백을 반영하여 처리 중입니다..."):
-
-                add_more_words = ["더 만들어", "더만들어", "추가로 만들어", "추가해줘", "더 추가",
-                                   "세트 추가", "더 뽑아", "하나 더", "한 세트 더", "두 세트 더",
-                                   "더 줘", "더 필요", "더 출제"]
-                is_add_more_request = any(w in user_feedback for w in add_more_words)
-
+            with st.spinner("요청하신 내용을 처리 중입니다..."):
+                
                 doc_request_words = ["만들어", "생성", "다운", "파일", "문서로", "저장", "그래", "응", "네", "해줘"]
-                is_doc_request = (not is_add_more_request) and any(w in user_feedback for w in doc_request_words) and len(user_feedback.strip()) < 15
-
+                is_doc_request = any(w in user_feedback for w in doc_request_words) and len(user_feedback.strip()) < 15
+                
                 if is_doc_request:
                     chat_path = create_chat_history_word(st.session_state.chat_history, student_name)
                     response_text = "네! 지금까지 나눈 대화 내용을 깔끔한 워드 문서로 생성했습니다. 상단 또는 아래의 **'💬 피드백 대화 내역 (.docx)'** 다운로드 버튼을 클릭해 주세요!"
@@ -862,69 +749,36 @@ if st.session_state.chat_history:
                     st.rerun()
                 else:
                     required_template = TEMPLATE_SANGBU if interview_type == "생기부 기반 면접" else TEMPLATE_JESIMUN
-                    previous_content = st.session_state.get("raw_content", "")
-
-                    if is_add_more_request:
-                        if interview_type == "생기부 기반 면접":
-                            add_more_instruction = f"""
-                            아래는 지금까지 생성된 기존 문항 전체입니다. 기존 문항은 절대 삭제·수정하지 말고 그대로 유지한 채,
-                            사용자의 요청 "{user_feedback}"에 맞춰 **새로운 문항을 최소 2세트 추가**로 작성하세요.
-                            (기존에 다루지 않은 생기부 영역/활동을 우선적으로 선택해 중복을 피하세요.)
-                            최종 결과물에는 기존 문항 전체 + 새로 추가한 최소 2세트가 모두 포함되어야 합니다.
-
-                            [기존 문항 전체]
-                            {previous_content}
-                            """
-                        else:
-                            add_more_instruction = f"""
-                            아래는 지금까지 생성된 기존 제시문 및 문항 전체입니다. 기존 내용은 절대 삭제·수정하지 말고 그대로 유지한 채,
-                            사용자의 요청 "{user_feedback}"에 맞춰 **새로운 제시문 세트를 최소 2세트 추가**로 작성하세요.
-                            (새로 추가하는 세트도 반드시 '(가)·(나) 제시문 + 문제 2개 + 출제근거 요약 = 1세트' 구조를 지키고,
-                            기존 세트와 겹치지 않는 새로운 주제/계열로 작성하세요. 세트 번호는 기존 마지막 번호 다음부터 이어서 매기세요.)
-                            최종 결과물에는 기존 제시문·문항 전체 + 새로 추가한 최소 2세트(제시문 세트 2개, 문제 4개 이상)가 모두 포함되어야 합니다.
-
-                            [기존 제시문 및 문항 전체]
-                            {previous_content}
-                            """
-                        feedback_prompt = f"""
-                        당신은 도개고 맞춤형 면접 출제위원입니다. 도개고 기출 수준의 심도 있는 학술적/실천적 깊이를 유지하면서
-                        **반드시 다음 템플릿 구조와 [키워드]를 토씨 하나 틀리지 말고 유지**해 주세요[cite: 3, 4].
-
-                        [강제 유지 템플릿]
-                        {required_template}
-
-                        {add_more_instruction}
-
-                        최종 출력은 기존 내용 + 새로 추가된 내용을 합친 전체 결과물이어야 합니다. 서론·안내 문구 없이 바로 문항 내용부터 출력하세요.
-                        """
-                    else:
-                        feedback_prompt = f"""
-                        당신은 도개고 맞춤형 면접 출제위원입니다. 아래 [기존 문항 전체]를 사용자의 피드백에 맞게 수정하되,
-                        도개고 기출 수준의 심도 있는 학술적/실천적 깊이를 유지하면서 **반드시 다음 템플릿 구조와 [키워드]를 토씨 하나 틀리지 말고 유지**해 주세요[cite: 3, 4].
-
-                        [강제 유지 템플릿]
-                        {required_template}
-
-                        [기존 문항 전체]
-                        {previous_content}
-
-                        사용자 피드백: "{user_feedback}"
-
-                        최종 출력은 피드백이 반영된 전체 결과물이어야 합니다. 서론·안내 문구 없이 바로 문항 내용부터 출력하세요.
-                        """
+                    
+                    add_instruction = ""
+                    if any(w in user_feedback for w in ["더", "추가", "많이", "늘려", "또"]):
+                        add_instruction = "\n(주의: 사용자가 문항 추가를 요청했으므로, 독립 세트를 **최소 2세트 이상 추가로** 더 생성해 주세요!)"
+                    
+                    feedback_prompt = f"""
+                    당신은 면접 출제위원입니다. 이전 내용을 사용자의 피드백에 맞게 수정하되, 
+                    심도 있는 학술적/실천적 깊이를 유지하면서 **반드시 다음 템플릿 구조와 [키워드]를 토씨 하나 틀리지 말고 유지**해 주세요.
+                    {add_instruction}
+                    
+                    [강제 유지 템플릿]
+                    {required_template}
+                    
+                    사용자 피드백: "{user_feedback}"
+                    """
                     try:
                         new_result = call_gemini(feedback_prompt, api_key)
-                        display_text = new_result.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n').replace('[활용모집단위]', '\n**🏫 [활용 모집단위]**\n').replace('[개념]', '\n**🔑 [핵심 개념]**\n').replace('[교육과정출처]', '\n**📚 [교육과정 출처]**\n').replace('[자료출처]', '\n**📖 [참고 자료출처]**\n')
-
-                        full_response = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)\n\n➕ 문항이 더 필요하시면 **'더 만들어줘'** 처럼 요청해 주세요. 요청 시 기존 내용은 그대로 유지한 채 **최소 2세트가 추가**됩니다."
-
+                        display_text = new_result.replace('[문제 1]', '\n**💡 [문제 1]**\n').replace('[평가의도 1]', '\n**🎯 [평가 의도 1]**\n').replace('[모범답안 1]', '\n**✅ [모범 답안 가이드 1]**\n').replace('[꼬리질문 1]', '\n**🔥 [압박용 꼬리질문 1]**\n')
+                        display_text = display_text.replace('[문제 2]', '\n**💡 [문제 2]**\n').replace('[평가의도 2]', '\n**🎯 [평가 의도 2]**\n').replace('[모범답안 2]', '\n**✅ [모범 답안 가이드 2]**\n').replace('[꼬리질문 2]', '\n**🔥 [압박용 꼬리질문 2]**\n')
+                        display_text = display_text.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n')
+                        display_text = display_text.replace('[제시문]', '\n**📄 [서울대 스타일 구술 제시문 (가, 나, 다)]**\n')
+                        
+                        full_response = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)"
+                        
                         st.markdown(full_response)
                         st.session_state.chat_history.append({"role": "assistant", "content": full_response})
-
-                        st.session_state.raw_content = new_result
+                        
                         stu_path, tea_path = create_word_files(new_result, student_name, interview_type, target_desc)
                         st.session_state.word_files = (stu_path, tea_path)
-                        st.rerun()
-
+                        st.rerun() 
+                        
                     except Exception as e:
                         st.error(f"피드백 반영 중 오류가 발생했습니다: {e}")
