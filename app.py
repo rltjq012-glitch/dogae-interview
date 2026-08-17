@@ -51,7 +51,7 @@ def call_gemini(prompt, api_key):
     raise Exception(f"AI 모델 통신 실패 (마지막 에러: {last_error})")
 
 # -------------------------------------------------------------------------
-# [2] 워드 표 생성 및 가독성/여백 최적화 엔진
+# [2] 🔥 워드 표 레이아웃 및 디자인 무너짐 완벽 방지 엔진 🔥
 # -------------------------------------------------------------------------
 def set_document_font(doc):
     style = doc.styles['Normal']
@@ -68,11 +68,23 @@ def set_cell_background(cell, fill_color):
     shd.set(qn('w:fill'), fill_color) 
     tcPr.append(shd)
 
+def set_cell_margins(cell, top=140, bottom=140, left=200, right=200):
+    """셀 내부 여백(Padding)을 설정하여 글자가 테두리에 붙어 깨지는 현상을 방지합니다."""
+    tcPr = cell._tc.get_or_add_tcPr()
+    tcMar = OxmlElement('w:tcMar')
+    for m, val in [('top', top), ('bottom', bottom), ('left', left), ('right', right)]:
+        node = OxmlElement(f'w:{m}')
+        node.set(qn('w:w'), str(val))
+        node.set(qn('w:type'), 'dxa')
+        tcMar.append(node)
+    tcPr.append(tcMar)
+
 def add_parsed_text_to_cell(cell, text):
+    set_cell_margins(cell) # 패딩 부여
     p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
     p.paragraph_format.line_spacing = 1.3
-    p.paragraph_format.space_before = Pt(8)
-    p.paragraph_format.space_after = Pt(8)
+    p.paragraph_format.space_before = Pt(4)
+    p.paragraph_format.space_after = Pt(4)
     parts = text.split("**")
     for i, part in enumerate(parts):
         run = p.add_run(part)
@@ -87,7 +99,7 @@ def add_intro_paragraphs(doc, text):
         p = doc.add_paragraph()
         p.paragraph_format.line_spacing = 1.3
         
-        if line.startswith("### 📄") or line.startswith("### 📌"):
+        if line.startswith("### 📄") or line.startswith("### 📌") or line.startswith("### 🔍"):
             run = p.add_run(line)
             run.bold = True
             run.font.size = Pt(12)
@@ -109,14 +121,16 @@ def create_word_files(content, student_name, interview_type, target_desc):
         set_document_font(doc)
         title_text = f"🎓 [{student_name}] {target_desc} 도개고 맞춤 모의면접 {'지침서 (교사용)' if is_teacher else '워크북 (학생용)'}"
         doc.add_heading(title_text, level=1)
-        doc.add_paragraph(f"[{type_label}] 본 문서는 서울대 구술고사 스타일 및 도개고 진로진학 기준에 맞춰 생성되었습니다.\n")
+        doc.add_paragraph(f"[{type_label}] 본 문서는 도개고등학교 진로진학 지도 기준에 맞춰 생성되었습니다.\n")
         
+        # 1. 생기부 분석 브리핑 리포트 파싱 및 추가
+        briefing_match = re.search(r'(### 🔍 \[생기부 심층 분석 브리핑 리포트\].*?)(?=### 📌|### 📄|$)', content, re.DOTALL)
+        if briefing_match:
+            add_intro_paragraphs(doc, briefing_match.group(1).strip())
+            doc.add_paragraph()
+
+        # 2. 질문 세트 블록 파싱
         blocks = content.split('### 📌')
-        intro_text = blocks[0].strip()
-        if intro_text:
-            add_intro_paragraphs(doc, intro_text)
-            doc.add_paragraph() 
-        
         for block in blocks[1:]:
             lines = block.strip().split('\n')
             if not lines: continue
@@ -127,12 +141,17 @@ def create_word_files(content, student_name, interview_type, target_desc):
             table = doc.add_table(rows=0, cols=1)
             table.style = 'Table Grid' 
             
+            # 페이지 넘김 시 표가 깨지지 않도록 방어 설정
+            for row in table.rows:
+                trPr = row._tr.get_or_add_trPr()
+                trPr.append(OxmlElement('w:cantSplit'))
+            
             row_title = table.add_row()
-            set_cell_background(row_title.cells[0], "EBF1FA")
-            add_parsed_text_to_cell(row_title.cells[0], f"📌 {title}")
+            cell_title = row_title.cells[0]
+            set_cell_background(cell_title, "EBF1FA")
+            add_parsed_text_to_cell(cell_title, f"📌 {title}")
             
             if is_jesimun:
-                # 서울대 구술고사 스타일 파싱 (제시문 + 문제 1, 문제 2)
                 js_match = re.search(r'\[제시문\](.*?)(?=\[문제 1\]|$)', body, re.DOTALL)
                 q1_match = re.search(r'\[문제 1\](.*?)(?=\[평가의도 1\]|\[문제 2\]|$)', body, re.DOTALL)
                 i1_match = re.search(r'\[평가의도 1\](.*?)(?=\[모범답안 1\]|$)', body, re.DOTALL)
@@ -189,7 +208,6 @@ def create_word_files(content, student_name, interview_type, target_desc):
                         set_cell_background(row_f2.cells[0], "FFF4F4")
                         add_parsed_text_to_cell(row_f2.cells[0], f"**[압박용 꼬리질문 2]**\n{f2_text}")
             else:
-                # 생기부 면접 형식
                 q_match = re.search(r'\[질문\](.*?)(?=\[평가의도\]|\[모범답안\]|\[꼬리질문\]|$)', body, re.DOTALL)
                 i_match = re.search(r'\[평가의도\](.*?)(?=\[모범답안\]|\[꼬리질문\]|$)', body, re.DOTALL)
                 a_match = re.search(r'\[모범답안\](.*?)(?=\[꼬리질문\]|$)', body, re.DOTALL)
@@ -309,11 +327,16 @@ if interview_type == "생기부 기반 면접":
 st.markdown("---")
 
 # -------------------------------------------------------------------------
-# [4] 생성 버튼 로직 (서울대 구술고사 스타일 3세트 독립 구조 반영)
+# [4] 생성 버튼 로직 (생기부 분석 브리핑 + 서울대 구술고사 스타일 결합)
 # -------------------------------------------------------------------------
 target_desc = f"{uni}_{major}" 
 
 TEMPLATE_SANGBU = """
+### 🔍 [생기부 심층 분석 브리핑 리포트]
+- **지원자 강점 분석:** (여기에 작성)
+- **보완점 및 약점 분석:** (여기에 작성)
+- **면접관 집중 공략 포인트 (심화 탐구 상기):** (여기에 작성)
+
 ### 📌 [영역: OOO] **[과목명/활동명]**
 [질문]
 (내용 작성)
@@ -397,13 +420,12 @@ if st.button("🚀 면접 패키지 생성 시작"):
     if interview_type == "생기부 기반 면접":
         prompt = f"""
         당신은 도개고등학교의 진학 지도 노하우와 {uni} {major} 입학사정관의 시각을 겸비한 최고급 면접 출제위원입니다. 
-        지원자 '{student_name}' 학생의 생기부를 분석하여 도개고 선배들이 실제 상위권/지역거점 대학 면접에서 마주했던 수준 높은 기출 문항들의 난이도와 깊이를 반영해 질문을 만드세요[cite: 3, 4].
-        면접 난이도: {difficulty}
+        지원자 '{student_name}' 학생의 생기부를 면밀히 분석하여 다음 작업을 수행하세요.
         
         [지시사항]
-        1. 생기부 5대 영역(1. 교과세특, 2. 창체, 3. 동아리, 4. 행특, 5. 독서/기타)을 모두 뒤져서 총 5세트를 만드세요.
-        2. 과목명이나 주요 활동명은 반드시 **[생활과 윤리]** 처럼 볼드체로 묶어주세요.
-        3. 단순 암기식 질문이 아니라 학생부 활동의 진위 여부, 동기, 심화 탐구 과정, 실생활 적용력을 파악하는 도개고 스타일의 날카로운 꼬리질문을 포함하세요[cite: 3, 4].
+        1. **출력의 맨 첫 부분**에 반드시 **[생기부 심층 분석 브리핑 리포트]**를 작성하여 학생의 **강점, 단점(보완점), 그리고 면접관이 예리하게 파고들 수 있는 심화탐구 활동 부분**을 상세히 짚어주어 학생이 면접 전 반드시 상기할 수 있도록 하세요.
+        2. 생기부 5대 영역(교과세특, 창체, 동아리, 행특, 독서 등)을 모두 분석하여 총 5세트의 면접 문항을 만드세요.
+        3. 과목명이나 주요 활동명은 반드시 **[생활과 윤리]** 처럼 볼드체로 묶어주고 도개고 기출 수준의 날카로운 꼬리질문을 포함하세요[cite: 3, 4].
         
         [출력 템플릿 엄수 - 파싱을 위해 키워드 대괄호를 절대 변경하지 마세요]
         {TEMPLATE_SANGBU}
@@ -413,19 +435,19 @@ if st.button("🚀 면접 패키지 생성 시작"):
         """
     else: 
         prompt = f"""
-        당신은 서울대학교 면접 및 구술고사 출제위원입니다. {major} 전공적합성과 종합적 사고력, 논리적 추론 능력을 평가하기 위한 고난도 제시문 기반 구술고사를 출제하세요[cite: 5].
+        당신은 서울대학교 면접 및 구술고사 출제위원입니다. {major} 전공적합성과 종합적 사고력, 논리적 추론 능력을 평가하기 위한 고난도 제시문 기반 구술고사를 출제하세요.
         면접 난이도: {difficulty}
         
         [지시사항]
         1. 생기부 내용은 무시하세요. {major} 학과와 관련된 학술적 딜레마와 심층 개념을 담은 **완전 독립된 3개의 주제 세트**를 창작하세요.
-        2. **각 세트마다 복수의 제시문((가), (나), (다) 형태)과 [문제 1], [문제 2] (각각 평가의도, 모범답안, 압박 꼬리질문 포함)**가 유기적으로 묶인 **총 3개의 독립 세트**를 엄격히 만드세요[cite: 5].
+        2. **각 세트마다 복수의 제시문((가), (나), (다) 형태)과 [문제 1], [문제 2] (각각 평가의도, 모범답안, 압박 꼬리질문 포함)**가 유기적으로 묶인 **총 3개의 독립 세트**를 엄격히 만드세요.
         3. 서론이나 인사말은 절대 쓰지 말고, 바로 '### 📌 [세트 1]' 부터 출력하세요.
         
         [출력 템플릿 엄수 - 파싱을 위해 키워드 대괄호를 절대 변경하지 마세요]
         {TEMPLATE_JESIMUN}
         """
     
-    with st.spinner(f"⏳ 로딩중... 서울대 구술고사 스타일의 {interview_type} 문항을 정밀 조립하고 있습니다."):
+    with st.spinner(f"⏳ 로딩중... 생기부 분석 브리핑 및 면접 문항을 정밀 조립하고 있습니다."):
         try:
             result_text = call_gemini(prompt, api_key)
             
@@ -440,7 +462,7 @@ if st.button("🚀 면접 패키지 생성 시작"):
             full_display_text = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)"
             
             st.session_state.chat_history = [{"role": "assistant", "content": full_display_text}]
-            st.success("🎉 서울대 구술고사 스타일 면접 패키지 및 워드 문서 생성이 완료되었습니다!")
+            st.success("🎉 면접 패키지 및 워드 문서 생성이 완료되었습니다!")
             
         except Exception as e:
             st.error(f"❌ 생성 실패: {e}")
@@ -494,11 +516,11 @@ if st.session_state.chat_history:
                     
                     add_instruction = ""
                     if any(w in user_feedback for w in ["더", "추가", "많이", "늘려", "또"]):
-                        add_instruction = "\n(주의: 사용자가 문항 추가를 요청했으므로, 복수 [제시문] + [문제 1], [문제 2]로 구성된 독립 세트를 **최소 2세트 이상 추가로** 더 생성해 주세요!)[cite: 5]"
+                        add_instruction = "\n(주의: 사용자가 문항 추가를 요청했으므로, 독립 세트를 **최소 2세트 이상 추가로** 더 생성해 주세요!)[cite: 3, 4]"
                     
                     feedback_prompt = f"""
-                    당신은 서울대 구술고사 맞춤형 면접 출제위원입니다. 이전 내용을 사용자의 피드백에 맞게 수정하되, 
-                    서울대 구술고사 기출 수준의 심도 있는 학술적 깊이를 유지하면서 **반드시 다음 템플릿 구조와 [키워드]를 토씨 하나 틀리지 말고 유지**해 주세요[cite: 5].
+                    당신은 면접 출제위원입니다. 이전 내용을 사용자의 피드백에 맞게 수정하되, 
+                    심도 있는 학술적/실천적 깊이를 유지하면서 **반드시 다음 템플릿 구조와 [키워드]를 토씨 하나 틀리지 말고 유지**해 주세요[cite: 3, 4].
                     {add_instruction}
                     
                     [강제 유지 템플릿]
