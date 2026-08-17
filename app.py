@@ -100,6 +100,7 @@ def add_intro_paragraphs(doc, text):
 
 def create_word_files(content, student_name, interview_type, target_desc):
     type_label = "생기부면접" if "생기부" in interview_type else "제시문면접"
+    is_jesimun = "제시문" in interview_type
     
     doc_student = Document()
     doc_teacher = Document()
@@ -111,7 +112,6 @@ def create_word_files(content, student_name, interview_type, target_desc):
         doc.add_paragraph(f"[{type_label}] 본 문서는 도개고등학교 진로진학 지도 기준에 맞춰 생성되었습니다.\n")
         
         blocks = content.split('### 📌')
-        
         intro_text = blocks[0].strip()
         if intro_text:
             add_intro_paragraphs(doc, intro_text)
@@ -124,16 +124,6 @@ def create_word_files(content, student_name, interview_type, target_desc):
             title = lines[0].strip()
             body = "\n".join(lines[1:])
             
-            q_match = re.search(r'\[질문\](.*?)(?=\[평가의도\]|\[모범답안\]|\[꼬리질문\]|$)', body, re.DOTALL)
-            i_match = re.search(r'\[평가의도\](.*?)(?=\[모범답안\]|\[꼬리질문\]|$)', body, re.DOTALL)
-            a_match = re.search(r'\[모범답안\](.*?)(?=\[꼬리질문\]|$)', body, re.DOTALL)
-            f_match = re.search(r'\[꼬리질문\](.*?)(?=$)', body, re.DOTALL)
-            
-            q_text = q_match.group(1).strip() if q_match else "내용 없음"
-            i_text = i_match.group(1).strip() if i_match else ""
-            a_text = a_match.group(1).strip() if a_match else ""
-            f_text = f_match.group(1).strip() if f_match else ""
-            
             table = doc.add_table(rows=0, cols=1)
             table.style = 'Table Grid' 
             
@@ -141,20 +131,84 @@ def create_word_files(content, student_name, interview_type, target_desc):
             set_cell_background(row_title.cells[0], "EBF1FA")
             add_parsed_text_to_cell(row_title.cells[0], f"📌 {title}")
             
-            row_q = table.add_row()
-            add_parsed_text_to_cell(row_q.cells[0], f"**[면접 질문]**\n{q_text}")
-            
-            if is_teacher:
-                row_i = table.add_row()
-                set_cell_background(row_i.cells[0], "F9F9F9")
-                add_parsed_text_to_cell(row_i.cells[0], f"**[평가 의도]**\n{i_text}")
+            if is_jesimun:
+                # 제시문 면접: 질문 1, 질문 2 파싱
+                q1_match = re.search(r'\[질문 1\](.*?)(?=\[평가의도 1\]|\[질문 2\]|$)', body, re.DOTALL)
+                i1_match = re.search(r'\[평가의도 1\](.*?)(?=\[모범답안 1\]|$)', body, re.DOTALL)
+                a1_match = re.search(r'\[모범답안 1\](.*?)(?=\[꼬리질문 1\]|$)', body, re.DOTALL)
+                f1_match = re.search(r'\[꼬리질문 1\](.*?)(?=\[질문 2\]|$)', body, re.DOTALL)
                 
-                row_a = table.add_row()
-                add_parsed_text_to_cell(row_a.cells[0], f"**[모범 답안 가이드]**\n{a_text}")
+                q2_match = re.search(r'\[질문 2\](.*?)(?=\[평가의도 2\]|$)', body, re.DOTALL)
+                i2_match = re.search(r'\[평가의도 2\](.*?)(?=\[모범답안 2\]|$)', body, re.DOTALL)
+                a2_match = re.search(r'\[모범답안 2\](.*?)(?=\[꼬리질문 2\]|$)', body, re.DOTALL)
+                f2_match = re.search(r'\[꼬리질문 2\](.*?)(?=$)', body, re.DOTALL)
                 
-                row_f = table.add_row()
-                set_cell_background(row_f.cells[0], "FFF4F4")
-                add_parsed_text_to_cell(row_f.cells[0], f"**[압박용 꼬리질문]**\n{f_text}")
+                q1_text = q1_match.group(1).strip() if q1_match else ""
+                i1_text = i1_match.group(1).strip() if i1_match else ""
+                a1_text = a1_match.group(1).strip() if a1_match else ""
+                f1_text = f1_match.group(1).strip() if f1_match else ""
+                
+                q2_text = q2_match.group(1).strip() if q2_match else ""
+                i2_text = i2_match.group(1).strip() if i2_match else ""
+                a2_text = a2_match.group(1).strip() if a2_match else ""
+                f2_text = f2_match.group(1).strip() if f2_match else ""
+                
+                # 질문 1 행 추가
+                row_q1 = table.add_row()
+                add_parsed_text_to_cell(row_q1.cells[0], f"**[질문 1]**\n{q1_text}")
+                if is_teacher:
+                    row_i1 = table.add_row()
+                    set_cell_background(row_i1.cells[0], "F9F9F9")
+                    add_parsed_text_to_cell(row_i1.cells[0], f"**[평가 의도 1]**\n{i1_text}")
+                    
+                    row_a1 = table.add_row()
+                    add_parsed_text_to_cell(row_a1.cells[0], f"**[모범 답안 가이드 1]**\n{a1_text}")
+                    
+                    row_f1 = table.add_row()
+                    set_cell_background(row_f1.cells[0], "FFF4F4")
+                    add_parsed_text_to_cell(row_f1.cells[0], f"**[압박용 꼬리질문 1]**\n{f1_text}")
+                
+                # 질문 2 행 추가
+                if q2_text:
+                    row_q2 = table.add_row()
+                    add_parsed_text_to_cell(row_q2.cells[0], f"**[질문 2]**\n{q2_text}")
+                    if is_teacher:
+                        row_i2 = table.add_row()
+                        set_cell_background(row_i2.cells[0], "F9F9F9")
+                        add_parsed_text_to_cell(row_i2.cells[0], f"**[평가 의도 2]**\n{i2_text}")
+                        
+                        row_a2 = table.add_row()
+                        add_parsed_text_to_cell(row_a2.cells[0], f"**[모범 답안 가이드 2]**\n{a2_text}")
+                        
+                        row_f2 = table.add_row()
+                        set_cell_background(row_f2.cells[0], "FFF4F4")
+                        add_parsed_text_to_cell(row_f2.cells[0], f"**[압박용 꼬리질문 2]**\n{f2_text}")
+            else:
+                # 생기부 면접 형식
+                q_match = re.search(r'\[질문\](.*?)(?=\[평가의도\]|\[모범답안\]|\[꼬리질문\]|$)', body, re.DOTALL)
+                i_match = re.search(r'\[평가의도\](.*?)(?=\[모범답안\]|\[꼬리질문\]|$)', body, re.DOTALL)
+                a_match = re.search(r'\[모범답안\](.*?)(?=\[꼬리질문\]|$)', body, re.DOTALL)
+                f_match = re.search(r'\[꼬리질문\](.*?)(?=$)', body, re.DOTALL)
+                
+                q_text = q_match.group(1).strip() if q_match else "내용 없음"
+                i_text = i_match.group(1).strip() if i_match else ""
+                a_text = a_match.group(1).strip() if a_match else ""
+                f_text = f_match.group(1).strip() if f_match else ""
+                
+                row_q = table.add_row()
+                add_parsed_text_to_cell(row_q.cells[0], f"**[면접 질문]**\n{q_text}")
+                
+                if is_teacher:
+                    row_i = table.add_row()
+                    set_cell_background(row_i.cells[0], "F9F9F9")
+                    add_parsed_text_to_cell(row_i.cells[0], f"**[평가 의도]**\n{i_text}")
+                    
+                    row_a = table.add_row()
+                    add_parsed_text_to_cell(row_a.cells[0], f"**[모범 답안 가이드]**\n{a_text}")
+                    
+                    row_f = table.add_row()
+                    set_cell_background(row_f.cells[0], "FFF4F4")
+                    add_parsed_text_to_cell(row_f.cells[0], f"**[압박용 꼬리질문]**\n{f_text}")
             
             doc.add_paragraph() 
 
@@ -268,20 +322,70 @@ TEMPLATE_SANGBU = """
 """
 
 TEMPLATE_JESIMUN = """
-### 📄 [상황 A] (또는 제시문 가)
-(상황 내용 구체적 서술)
+### 📄 [제시문 1]
+(제시문 1 내용)
 
-### 📄 [상황 B] (또는 제시문 나)
-(상황 내용 구체적 서술)
+### 📄 [제시문 2]
+(제시문 2 내용)
 
-### 📌 [문항 1] **[상황 A와 B 비교 분석]**
-[질문]
+### 📄 [제시문 3]
+(제시문 3 내용)
+
+### 📌 [세트 1] **[제시문 1 기반 문항]**
+[질문 1]
+(질문 1 내용)
+[평가의도 1]
 (내용 작성)
-[평가의도]
+[모범답안 1]
 (내용 작성)
-[모범답안]
+[꼬리질문 1]
 (내용 작성)
-[꼬리질문]
+
+[질문 2]
+(질문 2 내용)
+[평가의도 2]
+(내용 작성)
+[모범답안 2]
+(내용 작성)
+[꼬리질문 2]
+(내용 작성)
+
+### 📌 [세트 2] **[제시문 2 기반 문항]**
+[질문 1]
+(질문 1 내용)
+[평가의도 1]
+(내용 작성)
+[모범답안 1]
+(내용 작성)
+[꼬리질문 1]
+(내용 작성)
+
+[질문 2]
+(질문 2 내용)
+[평가의도 2]
+(내용 작성)
+[모범답안 2]
+(내용 작성)
+[꼬리질문 2]
+(내용 작성)
+
+### 📌 [세트 3] **[제시문 3 기반 문항]**
+[질문 1]
+(질문 1 내용)
+[평가의도 1]
+(내용 작성)
+[모범답안 1]
+(내용 작성)
+[꼬리질문 1]
+(내용 작성)
+
+[질문 2]
+(질문 2 내용)
+[평가의도 2]
+(내용 작성)
+[모범답안 2]
+(내용 작성)
+[꼬리질문 2]
 (내용 작성)
 """
 
@@ -315,9 +419,9 @@ if st.button("🚀 면접 패키지 생성 시작"):
         면접 난이도: {difficulty}
         
         [지시사항]
-        1. 생기부 내용은 무시하세요. {major} 학과와 관련된 고난도 딜레마 상황이나 철학적/학술적 주제가 담긴 '상황 A, B' (또는 제시문 가, 나)를 도개고 학생들의 수능/구술 면접 수준에 맞춰 창작하여 먼저 제시하세요[cite: 3, 4].
-        2. 제시된 상황/제시문을 비교 분석하거나 해결책을 묻는 문항 3세트를 만드세요.
-        3. 서론이나 인사말은 절대 쓰지 말고, 바로 '### 📄 [상황 A]' 부터 출력하세요.
+        1. 생기부 내용은 무시하세요. {major} 학과와 관련된 고난도 딜레마 상황이나 철학적/학술적 주제가 담긴 **제시문 3개**를 도개고 학생들의 수능/구술 면접 수준에 맞춰 먼저 창작하세요[cite: 3, 4].
+        2. **제시문 1개당 질문 2개씩** 연결하여 **총 3세트**(세트 1, 세트 2, 세트 3)를 구성하세요.
+        3. 서론이나 인사말은 절대 쓰지 말고, 바로 '### 📄 [제시문 1]' 부터 출력하세요.
         
         [출력 템플릿 엄수 - 파싱을 위해 키워드 대괄호를 절대 변경하지 마세요]
         {TEMPLATE_JESIMUN}
@@ -330,9 +434,10 @@ if st.button("🚀 면접 패키지 생성 시작"):
             stu_path, tea_path = create_word_files(result_text, student_name, interview_type, target_desc)
             st.session_state.word_files = (stu_path, tea_path)
             
-            display_text = result_text.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n')
+            display_text = result_text.replace('[질문 1]', '\n**💡 [질문 1]**\n').replace('[평가의도 1]', '\n**🎯 [평가 의도 1]**\n').replace('[모범답안 1]', '\n**✅ [모범 답안 가이드 1]**\n').replace('[꼬리질문 1]', '\n**🔥 [압박용 꼬리질문 1]**\n')
+            display_text = display_text.replace('[질문 2]', '\n**💡 [질문 2]**\n').replace('[평가의도 2]', '\n**🎯 [평가 의도 2]**\n').replace('[모범답안 2]', '\n**✅ [모범 답안 가이드 2]**\n').replace('[꼬리질문 2]', '\n**🔥 [압박용 꼬리질문 2]**\n')
+            display_text = display_text.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n')
             
-            # 대화 유도 문구 추가
             full_display_text = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)"
             
             st.session_state.chat_history = [{"role": "assistant", "content": full_display_text}]
@@ -388,9 +493,15 @@ if st.session_state.chat_history:
                 else:
                     required_template = TEMPLATE_SANGBU if interview_type == "생기부 기반 면접" else TEMPLATE_JESIMUN
                     
+                    # 사용자가 문항 추가를 요청한 경우 최소 2세트 이상 추가 생성 지시
+                    add_instruction = ""
+                    if any(w in user_feedback for w in ["더", "추가", "많이", "늘려", "또"]):
+                        add_instruction = "\n(주의: 사용자가 문항 추가를 요청했으므로, **제시문 1개 + 질문 2개로 구성된 세트를 최소 2세트 이상 추가로** 더 생성해 주세요!)"
+                    
                     feedback_prompt = f"""
                     당신은 도개고 맞춤형 면접 출제위원입니다. 이전 내용을 사용자의 피드백에 맞게 수정하되, 
                     도개고 기출 수준의 심도 있는 학술적/실천적 깊이를 유지하면서 **반드시 다음 템플릿 구조와 [키워드]를 토씨 하나 틀리지 말고 유지**해 주세요[cite: 3, 4].
+                    {add_instruction}
                     
                     [강제 유지 템플릿]
                     {required_template}
@@ -399,7 +510,9 @@ if st.session_state.chat_history:
                     """
                     try:
                         new_result = call_gemini(feedback_prompt, api_key)
-                        display_text = new_result.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n')
+                        display_text = new_result.replace('[질문 1]', '\n**💡 [질문 1]**\n').replace('[평가의도 1]', '\n**🎯 [평가 의도 1]**\n').replace('[모범답안 1]', '\n**✅ [모범 답안 가이드 1]**\n').replace('[꼬리질문 1]', '\n**🔥 [압박용 꼬리질문 1]**\n')
+                        display_text = display_text.replace('[질문 2]', '\n**💡 [질문 2]**\n').replace('[평가의도 2]', '\n**🎯 [평가 의도 2]**\n').replace('[모범답안 2]', '\n**✅ [모범 답안 가이드 2]**\n').replace('[꼬리질문 2]', '\n**🔥 [압박용 꼬리질문 2]**\n')
+                        display_text = display_text.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n')
                         
                         full_response = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)"
                         
