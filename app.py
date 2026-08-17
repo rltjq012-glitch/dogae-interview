@@ -13,6 +13,7 @@ import pymupdf
 import os
 import re
 from google import genai
+from google.genai import types  # 오디오 파일 처리를 위해 추가
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -21,7 +22,7 @@ from docx.oxml.ns import qn
 
 st.set_page_config(page_title="도개고 면접 마스터", layout="wide", page_icon="🎓")
 
-# 🌟 트렌디한 웹디자인 UI/UX 커스텀 CSS 주입 🌟
+# 🌟 트렌디한 웹디자인 UI/UX 커스텀 CSS 주입 (눈부심 해결) 🌟
 custom_css = """
 <style>
 @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
@@ -29,7 +30,7 @@ html, body, [class*="css"] {
     font-family: 'Pretendard', sans-serif !important;
 }
 h1, h2, h3 {
-    color: #1e3a8a !important; 
+    color: #3b82f6 !important; 
     font-weight: 800 !important;
     letter-spacing: -0.5px;
 }
@@ -59,11 +60,7 @@ h1, h2, h3 {
 }
 .stFileUploader>div>div {
     border-radius: 12px !important;
-    background-color: #f8fafc !important;
     border: 2px dashed #cbd5e1 !important;
-}
-[data-testid="stSidebar"] {
-    background-color: #f1f5f9 !important;
 }
 hr {
     border-top: 2px dashed #e2e8f0 !important;
@@ -126,12 +123,11 @@ def call_gemini_audio_eval(audio_bytes, api_key):
     3. 🔥 **[추가 압박 꼬리질문]**: 학생의 답변 내용 중 논리적 비약이 있거나 더 깊이 파고들 만한 날카로운 꼬리질문을 하나 던져주세요.
     """
     try:
+        # 신규 GenAI SDK 오디오 파일 처리 규격 적용
+        audio_part = types.Part.from_bytes(data=audio_bytes, mime_type='audio/wav')
         response = client.models.generate_content(
             model='gemini-1.5-flash',
-            contents=[
-                {"mime_type": "audio/wav", "data": audio_bytes},
-                prompt
-            ]
+            contents=[audio_part, prompt]
         )
         return response.text
     except Exception as e:
@@ -207,7 +203,7 @@ def create_word_files(content, student_name, interview_type, target_desc):
         set_document_font(doc)
         title_text = f"🎓 [{student_name}] {target_desc} 도개고 맞춤 모의면접 {'지침서 (교사용)' if is_teacher else '워크북 (학생용)'}"
         doc.add_heading(title_text, level=1)
-        doc.add_paragraph(f"[{type_label}] 본 문서는 서울대 구술고사 스타일 및 도개고 진로진학 지도 기준에 맞춰 생성되었습니다.\n")
+        doc.add_paragraph(f"[{type_label}] 본 문서는 도개고등학교 진로진학 지도 기준에 맞춰 생성되었습니다.\n")
         
         briefing_match = re.search(r'(### 🔍 \[생기부 심층 분석 브리핑 리포트\].*?)(?=### 📌|### 📄|$)', content, re.DOTALL)
         if briefing_match:
@@ -353,6 +349,9 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "word_files" not in st.session_state:
     st.session_state.word_files = None
+# 중복 평가를 막기 위한 세션 상태
+if "last_audio_size" not in st.session_state:
+    st.session_state.last_audio_size = 0
 
 st.title("🎓 도개고 대입 모의면접 마스터 솔루션")
 
@@ -527,7 +526,7 @@ if st.button("🚀 면접 패키지 생성 시작"):
         {TEMPLATE_JESIMUN}
         """
     
-    with st.spinner(f"⏳ 로딩중... 생기부 분석 브리핑 및 면접 문항을 정밀 조립하고 있습니다."):
+    with st.spinner(f"⏳ 로딩중... 면접 문항을 정밀 조립하고 있습니다."):
         try:
             result_text = call_gemini(prompt, api_key)
             
@@ -548,7 +547,7 @@ if st.button("🚀 면접 패키지 생성 시작"):
             st.error(f"❌ 생성 실패: {e}")
 
 # -------------------------------------------------------------------------
-# [5] 결과 대시보드 및 실시간 피드백 (음성 인식 포함)
+# [5] 결과 대시보드 및 실시간 피드백 (음성 인식 중복 호출 방어 포함)
 # -------------------------------------------------------------------------
 if st.session_state.chat_history:
     st.markdown("## 📋 면접 문항 대시보드 및 실시간 피드백")
@@ -578,17 +577,22 @@ if st.session_state.chat_history:
     
     audio_value = st.audio_input("🎙️ 음성으로 면접 답변하기 (녹음 버튼을 누르고 답변을 말해보세요!)")
     
-    if audio_value:
-        if not api_key:
-            st.error("API 키를 입력해 주세요.")
-        else:
-            with st.spinner("AI 면접관이 학생의 음성을 분석하고 답변을 평가 중입니다..."):
-                audio_bytes = audio_value.read()
-                eval_result = call_gemini_audio_eval(audio_bytes, api_key)
-                
-                st.session_state.chat_history.append({"role": "user", "content": "[🎙️ 음성 답변 제출 완료]"})
-                st.session_state.chat_history.append({"role": "assistant", "content": eval_result})
-                st.rerun()
+    if audio_value is not None:
+        # 이전에 처리한 오디오 파일과 크기가 다른(새로운) 파일인 경우에만 AI 평가 진행
+        if st.session_state.last_audio_size != audio_value.size:
+            if not api_key:
+                st.error("API 키를 입력해 주세요.")
+            else:
+                with st.spinner("AI 면접관이 학생의 음성을 분석하고 답변을 평가 중입니다..."):
+                    audio_bytes = audio_value.read()
+                    eval_result = call_gemini_audio_eval(audio_bytes, api_key)
+                    
+                    st.session_state.chat_history.append({"role": "user", "content": "[🎙️ 음성 답변 제출 완료]"})
+                    st.session_state.chat_history.append({"role": "assistant", "content": eval_result})
+                    
+                    # 방어막 갱신: 이번에 처리한 오디오 크기를 저장해 둠 (무한루프 방지)
+                    st.session_state.last_audio_size = audio_value.size
+                    st.rerun()
 
     if user_feedback := st.chat_input("질문을 더 어렵게 하거나 답변을 입력해보세요 (키보드 마이크🎤 활용 가능)"):
         st.session_state.chat_history.append({"role": "user", "content": user_feedback})
