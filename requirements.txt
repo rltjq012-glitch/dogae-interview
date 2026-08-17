@@ -1,4 +1,4 @@
-streamlit
-PyMuPDF
+streamlit>=1.38.0
+pymupdf
 google-genai
 python-docx
