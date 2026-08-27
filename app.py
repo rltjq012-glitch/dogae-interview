@@ -26,33 +26,20 @@ st.set_page_config(page_title="도개고 면접 마스터", layout="wide", page_
 # 🌟 트렌디한 고급 UI/UX 및 다크모드 대응 CSS 주입 🌟
 custom_css = """
 <style>
-/* 트렌디한 Pretendard 폰트 전역 적용 */
 @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
 html, body, [class*="css"] {
     font-family: 'Pretendard', sans-serif !important;
 }
-
-/* 라이트모드 기본 배경색 */
 @media (prefers-color-scheme: light) {
-    [data-testid="stAppViewContainer"] {
-        background-color: #F9F8F3 !important;
-    }
-    [data-testid="stSidebar"] {
-        background-color: #F0EFEA !important;
-    }
+    [data-testid="stAppViewContainer"] { background-color: #F9F8F3 !important; }
+    [data-testid="stSidebar"] { background-color: #F0EFEA !important; }
 }
-
-/* 다크모드 기본 배경색 */
 @media (prefers-color-scheme: dark) {
-    [data-testid="stAppViewContainer"] {
-        background-color: #121212 !important;
-    }
-    [data-testid="stSidebar"] {
-        background-color: #1A1A1A !important;
-    }
+    [data-testid="stAppViewContainer"] { background-color: #121212 !important; }
+    [data-testid="stSidebar"] { background-color: #1A1A1A !important; }
 }
 
-/* 🎓 헤더 배너 (딥그린 & 골드 조합) */
+/* 🎓 헤더 배너 */
 .hero-banner {
     background: linear-gradient(135deg, #192c23 0%, #294435 100%);
     border-radius: 16px;
@@ -60,8 +47,6 @@ html, body, [class*="css"] {
     color: white;
     margin-bottom: 2rem;
     box-shadow: 0 10px 25px rgba(0,0,0,0.15);
-    position: relative;
-    overflow: hidden;
 }
 .hero-badge {
     display: inline-block;
@@ -78,13 +63,11 @@ html, body, [class*="css"] {
     font-weight: 800;
     margin: 0 0 0.5rem 0;
     color: #ffffff;
-    letter-spacing: -0.5px;
 }
 .hero-subtitle {
     font-size: 1.05rem;
     color: #a7f3d0;
     margin: 0;
-    font-weight: 400;
 }
 .hero-line {
     width: 50px;
@@ -127,7 +110,6 @@ html, body, [class*="css"] {
     border-radius: 30px !important;
     font-weight: 600 !important;
     padding: 0.5rem 1rem !important;
-    transition: all 0.3s ease !important;
     width: 100%;
 }
 .stDownloadButton > button:hover {
@@ -142,7 +124,7 @@ html, body, [class*="css"] {
     }
 }
 
-/* 메인 동작 버튼 (생성 버튼) */
+/* 메인 동작 버튼 */
 div.stButton > button:first-child {
     background: linear-gradient(135deg, #192c23 0%, #294435 100%) !important;
     color: white !important;
@@ -150,36 +132,16 @@ div.stButton > button:first-child {
     border-radius: 12px !important;
     padding: 0.7rem 1.2rem !important;
     font-weight: 700 !important;
-    font-size: 1.1rem !important;
     box-shadow: 0 4px 6px rgba(0,0,0,0.1) !important;
     transition: all 0.3s ease !important;
     width: 100%;
 }
 div.stButton > button:first-child:hover {
     transform: translateY(-2px) !important;
-    box-shadow: 0 6px 12px rgba(0,0,0,0.2) !important;
 }
 
-/* 입력 필드 디자인 */
-.stTextInput>div>div>input {
-    border-radius: 8px !important;
-    border: 1px solid #cbd5e1 !important;
-}
-.stTextInput>div>div>input:focus {
-    border-color: #294435 !important;
-    box-shadow: 0 0 0 1px #294435 !important;
-}
-.stFileUploader>div>div {
-    border-radius: 12px !important;
-    border: 2px dashed #cbd5e1 !important;
-    background-color: rgba(255,255,255,0.5) !important;
-}
-@media (prefers-color-scheme: dark) {
-    .stFileUploader>div>div {
-        background-color: rgba(0,0,0,0.2) !important;
-        border-color: #475569 !important;
-    }
-}
+.stTextInput>div>div>input { border-radius: 8px !important; }
+.stFileUploader>div>div { border-radius: 12px !important; }
 </style>
 """
 st.markdown(custom_css, unsafe_allow_html=True)
@@ -197,7 +159,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------------
-# [1] 스마트 PDF 및 제미나이 통신 함수
+# [1] 스마트 PDF 및 제미나이 통신 함수 (텍스트 및 오디오)
 # -------------------------------------------------------------------------
 def extract_text_from_pdf(uploaded_file):
     doc = pymupdf.open(stream=uploaded_file.read(), filetype="pdf")
@@ -213,7 +175,6 @@ def call_gemini(prompt, api_key):
         prompt = str(prompt)
         
     client = genai.Client(api_key=api_key)
-    
     available_models = []
     try:
         for m in client.models.list():
@@ -223,9 +184,7 @@ def call_gemini(prompt, api_key):
     except:
         available_models = ["gemini-1.5-flash", "gemini-1.5-pro"]
         
-    if not available_models:
-        available_models = ["gemini-1.5-flash-latest"]
-        
+    if not available_models: available_models = ["gemini-1.5-flash-latest"]
     models_to_try = sorted(available_models, key=lambda x: "flash" not in x)
     
     last_error = ""
@@ -236,7 +195,6 @@ def call_gemini(prompt, api_key):
         except Exception as e:
             last_error = str(e)
             time.sleep(2) 
-            
     raise Exception(f"AI 모델 통신 실패 (마지막 에러: {last_error})")
 
 def call_gemini_audio_eval(audio_bytes, api_key):
@@ -244,12 +202,10 @@ def call_gemini_audio_eval(audio_bytes, api_key):
     prompt = """
     당신은 도개고등학교의 날카롭고 전문적인 면접관입니다. 다음은 학생이 면접 질문에 대해 직접 스마트폰으로 녹음한 음성 답변입니다.
     아래 3가지 항목을 반드시 포함하여 분석 및 평가 리포트를 작성해 주세요.
-    
     1. 🗣️ **[답변 내용 변환 (STT)]**: 학생의 음성을 텍스트로 정확하게 받아적어 주세요.
-    2. 📊 **[면접관의 평가]**: 학생의 답변을 '논리성, 표현력, 전공적합성'을 기준으로 분석하고 종합 평가를 [상 / 중 / 하]로 매겨주세요. 구체적인 칭찬과 보완점(피드백)을 작성해 주세요.
+    2. 📊 **[면접관의 평가]**: 학생의 답변을 '논리성, 표현력, 전공적합성'을 기준으로 분석하고 종합 평가를 [상 / 중 / 하]로 매겨주세요.
     3. 🔥 **[추가 압박 꼬리질문]**: 학생의 답변 내용 중 논리적 비약이 있거나 더 깊이 파고들 만한 날카로운 꼬리질문을 하나 던져주세요.
     """
-    
     available_models = []
     try:
         for m in client.models.list():
@@ -258,26 +214,19 @@ def call_gemini_audio_eval(audio_bytes, api_key):
                 available_models.append(name)
     except:
         pass
-        
-    if not available_models:
-        available_models = ["gemini-1.5-flash-latest", "gemini-1.5-flash"]
-        
+    if not available_models: available_models = ["gemini-1.5-flash-latest", "gemini-1.5-flash"]
     models_to_try = sorted(available_models, key=lambda x: "flash" not in x)
     
     last_error = ""
     for target_model in models_to_try[:3]:
         try:
             audio_part = types.Part.from_bytes(data=audio_bytes, mime_type='audio/wav')
-            response = client.models.generate_content(
-                model=target_model,
-                contents=[audio_part, prompt]
-            )
+            response = client.models.generate_content(model=target_model, contents=[audio_part, prompt])
             return response.text
         except Exception as e:
             last_error = str(e)
             time.sleep(2)
-            
-    return f"음성 분석 실패: {last_error}\n(API 키 설정이나 모델 상태를 확인해 주세요.)"
+    return f"음성 분석 실패: {last_error}"
 
 # -------------------------------------------------------------------------
 # [2] 워드 표 레이아웃 및 디자인 무너짐 완벽 방지 엔진
@@ -326,7 +275,6 @@ def add_intro_paragraphs(doc, text):
         if not line: continue
         p = doc.add_paragraph()
         p.paragraph_format.line_spacing = 1.3
-        
         if line.startswith("### 📄") or line.startswith("### 📌") or line.startswith("### 🔍"):
             run = p.add_run(line)
             run.bold = True
@@ -341,7 +289,6 @@ def add_intro_paragraphs(doc, text):
 def create_word_files(content, student_name, interview_type, target_desc):
     type_label = "생기부면접" if "생기부" in interview_type else "제시문면접"
     is_jesimun = "제시문" in interview_type
-    
     doc_student = Document()
     doc_teacher = Document()
     
@@ -363,10 +310,8 @@ def create_word_files(content, student_name, interview_type, target_desc):
             
             title = lines[0].strip()
             body = "\n".join(lines[1:])
-            
             table = doc.add_table(rows=0, cols=1)
             table.style = 'Table Grid' 
-            
             for row in table.rows:
                 trPr = row._tr.get_or_add_trPr()
                 trPr.append(OxmlElement('w:cantSplit'))
@@ -451,14 +396,12 @@ def create_word_files(content, student_name, interview_type, target_desc):
                     row_f = table.add_row()
                     set_cell_background(row_f.cells[0], "FFF4F4")
                     add_parsed_text_to_cell(row_f.cells[0], f"**[압박용 꼬리질문]**\n{f_text}")
-            
             doc.add_paragraph() 
 
     student_path = f"{student_name}_{target_desc}_{type_label}_학생용.docx"
     teacher_path = f"{student_name}_{target_desc}_{type_label}_교사용.docx"
     doc_student.save(student_path)
     doc_teacher.save(teacher_path)
-
     return student_path, teacher_path
 
 def create_chat_history_word(chat_history, student_name):
@@ -466,7 +409,6 @@ def create_chat_history_word(chat_history, student_name):
     set_document_font(doc)
     doc.add_heading(f"💬 [{student_name}] 면접 문항 피드백 대화 내역", level=1)
     doc.add_paragraph("AI 출제위원과의 피드백 기록입니다.\n" + "="*50)
-    
     for msg in chat_history:
         role_title = "👤 선생님/학생 (요청)" if msg["role"] == "user" else "🤖 AI 출제위원 (답변/평가)"
         doc.add_heading(role_title, level=2)
@@ -477,20 +419,16 @@ def create_chat_history_word(chat_history, student_name):
             run = p.add_run(part)
             if i % 2 != 0: run.bold = True
         doc.add_paragraph("-" * 50)
-
     file_path = f"{student_name}_피드백_대화내역.docx"
     doc.save(file_path)
     return file_path
 
 # -------------------------------------------------------------------------
-# [3] 메인 UI 
+# [3] 메인 UI 설정
 # -------------------------------------------------------------------------
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "word_files" not in st.session_state:
-    st.session_state.word_files = None
-if "last_audio_size" not in st.session_state:
-    st.session_state.last_audio_size = 0
+if "chat_history" not in st.session_state: st.session_state.chat_history = []
+if "word_files" not in st.session_state: st.session_state.word_files = None
+if "last_audio_size" not in st.session_state: st.session_state.last_audio_size = 0
 
 with st.expander("📖 [클릭] 프로그램 사용 설명서 및 PDF OCR 변환 방법", expanded=False):
     st.markdown("""
@@ -501,12 +439,6 @@ with st.expander("📖 [클릭] 프로그램 사용 설명서 및 PDF OCR 변환
 
     ### 📂 [중요] 생기부 PDF는 반드시 '텍스트 추출(OCR)'된 파일이어야 합니다!
     * **왜 필요한가요?** 단순 이미지(스캔본) PDF는 AI가 글자를 읽지 못하므로, **마우스로 글자가 드래그되거나 텍스트로 인식되는 PDF**여야만 정상 분석이 가능합니다.
-    * **스캔된 PDF를 OCR(텍스트형)로 변환하는 방법:**
-      1. **구글 드라이브(Google Drive) 활용 (가장 추천):**
-         - 스캔된 생기부 PDF 파일을 구글 드라이브에 업로드합니다.
-         - 업로드된 파일 우클릭 ➔ **[연결 앱]** ➔ **[Google 문서]**를 선택하여 엽니다.
-         - 구글 문서로 열리면 이미지가 텍스트로 자동 변환됩니다. 상단 메뉴 **[파일] ➔ [다운로드] ➔ [Microsoft Word(.docx)]** 또는 PDF로 저장합니다.
-      2. **온라인 무료 툴 활용:** 'ILOVEPDF' 등의 사이트에서 'OCR PDF' 메뉴를 이용해 변환합니다.
 
     ### 🎙️ [신규] 휴대폰 음성 인식(STT) 면접 평가 기능 사용법!
     * **1단계 (키보드 활용):** 휴대폰으로 접속 시, 하단 채팅창을 누른 후 **휴대폰 키보드에 있는 '마이크(🎤)' 버튼**을 누르고 말하면 텍스트로 바로 입력됩니다.
@@ -526,11 +458,7 @@ col1, col2 = st.columns(2)
 with col1:
     interview_type = st.radio("🎯 면접 방식", ["생기부 기반 면접", "상위권 대학 제시문 기반 면접"], horizontal=True)
     region = st.selectbox("📍 권역 선택", ["서울권", "충청권", "경상권", "직접 입력"])
-    if region == "직접 입력":
-        uni = st.text_input("🏫 대학 직접 입력", value="한국대")
-    else:
-        uni = st.selectbox("🏫 대학 선택", UNIVERSITIES[region])
-
+    uni = st.text_input("🏫 대학 직접 입력", value="한국대") if region == "직접 입력" else st.selectbox("🏫 대학 선택", UNIVERSITIES[region])
 with col2:
     major = st.text_input("🎓 지원 학과/전공", placeholder="예: 철학과")
     student_name = st.text_input("👤 지원자 성명", value="김기섭")
@@ -543,9 +471,33 @@ if interview_type == "생기부 기반 면접":
 st.markdown("---")
 
 # -------------------------------------------------------------------------
-# [4] 생성 버튼 로직 (디테일 템플릿 강화)
+# [4] 데이터 기반 프롬프트 및 생성 로직
 # -------------------------------------------------------------------------
 target_desc = f"{uni}_{major}" 
+
+# 🔥 선생님이 주신 20종 기출문제 빅데이터 패턴 완벽 통합 (프롬프트 주입용) 🔥
+PAST_EXAM_DATA = """
+[도개고 선배들의 20종 실제 합격 기출문제 데이터베이스 (학습용)]
+AI는 아래의 실제 대입 기출문제들의 말투, 꼬리질문 방식, 생기부 파고들기 패턴을 완벽히 학습하여 문항을 생성해야 합니다.
+
+<기출 패턴 1. 진위 여부, 실험 과정 및 세특 딥다이브>
+- "사회문화 세특에서 사회복지 자율 연구 동아리를 결성하여 활동했다고 했는데, 이에 관해 구체적으로 설명해 줄 수 있나요?"
+- "혈당량 측정 실험을 진행했는데 전체적인 실험의 과정과 이 연구의 시간 차이는 어땠는지 말해보세요."
+- "(압박 꼬리질문) 그 실험을 진행할 때 도르래의 마찰과 같은 통제 변인을 고려했나요? 아니면 고려하지 않았나요?"
+
+<기출 패턴 2. 개념 설명 및 기술적/논리적 문제 해결>
+- "그렇다면 앱을 개발하면서 디바이스에 따른 화질 문제가 발생하였을 것인데 이는 기술적으로 어떻게 해결하였나요?"
+- "빅데이터가 인공지능에 왜 중요하다고 생각하는지 본인의 탐구 내용과 엮어서 설명해볼까요?"
+- "유전과 암 발병, 비타민 관계 등에서 다양한 탐구를 한 것 같은데, 상관관계를 먼저 설명하고 어떻게 예방할 수 있는지 말해볼까요?"
+
+<기출 패턴 3. 독서 및 매체 연계 심화 검증>
+- "발달장애 아동에 대해 탐구하면서 '뇌를 알면 아이가 보인다'를 읽고 뇌의 특징에 대해 알아보았다고 하는데 자세히 말해줄래요?"
+- "“도시는 역사다”를 읽었는데 책에서 다룬 많은 도시 중 가장 인상 깊게 읽은 도시는 무엇인가요?"
+
+<기출 패턴 4. 가치관 및 리더십>
+- "부회장으로 활동하면서 의견수렴으로 힘들었던 것과 극복 사례를 말씀해 주시고, 많은 봉사를 할 수 있던 원동력에 대해 말씀해 주세요."
+- "갈등이 발생했을 때 본인만의 대처 방법은 무엇이며, 그 안에서 학생이 생각하는 리더십이란 무엇이었나요?"
+"""
 
 TEMPLATE_SANGBU = """
 ### 🔍 [생기부 심층 분석 브리핑 리포트]
@@ -638,10 +590,12 @@ if st.button("🚀 면접 패키지 생성 시작"):
         당신은 도개고등학교의 진학 지도 노하우와 {uni} {major} 입학사정관의 시각을 겸비한 최고급 면접 출제위원입니다. 
         지원자 '{student_name}' 학생의 생기부를 면밀히 분석하여 다음 작업을 수행하세요.
         
+        {PAST_EXAM_DATA}
+        
         [지시사항]
-        1. **출력의 맨 첫 부분**에 반드시 **[생기부 심층 분석 브리핑 리포트]**를 작성하세요. 단순 요약이 아닌, 실제 입학사정관의 눈으로 학생의 생기부를 현미경처럼 해부하여 구체적인 활동명과 과목명을 직접 언급하며 **매우 디테일하고 상세하게 분량 있게** 분석해야 합니다.
+        1. **출력의 맨 첫 부분**에 반드시 **[생기부 심층 분석 브리핑 리포트]**를 작성하세요. 단순 요약이 아닌, 실제 입학사정관의 눈으로 학생의 생기부를 현미경처럼 해부하여 구체적인 활동명과 과목명을 직접 언급하며 **매우 디테일하고 상세하게 분량 있게** 분석해야 합니다. 단점 방어 전략도 필수로 기재하세요.
         2. 생기부 5대 영역(교과세특, 창체, 동아리, 행특, 독서 등)을 모두 분석하여 총 5세트의 면접 문항을 만드세요.
-        3. 과목명이나 주요 활동명은 반드시 **[생활과 윤리]** 처럼 볼드체로 묶어주고 도개고 기출 수준의 날카로운 꼬리질문을 포함하세요.
+        3. 과목명이나 주요 활동명은 반드시 **[생활과 윤리]** 처럼 볼드체로 묶어주고 학습된 기출 데이터 패턴 수준의 날카로운 꼬리질문을 포함하세요.
         
         [출력 템플릿 엄수 - 파싱을 위해 키워드 대괄호를 절대 변경하지 마세요]
         {TEMPLATE_SANGBU}
@@ -654,6 +608,8 @@ if st.button("🚀 면접 패키지 생성 시작"):
         당신은 서울대학교 면접 및 구술고사 출제위원입니다. {major} 전공적합성과 종합적 사고력, 논리적 추론 능력을 평가하기 위한 고난도 제시문 기반 구술고사를 출제하세요.
         면접 난이도: {difficulty}
         
+        {PAST_EXAM_DATA}
+        
         [지시사항]
         1. 생기부 내용은 무시하세요. {major} 학과와 관련된 학술적 딜레마와 심층 개념을 담은 **완전 독립된 3개의 주제 세트**를 창작하세요.
         2. **각 세트마다 복수의 제시문((가), (나), (다) 형태)과 [문제 1], [문제 2] (각각 평가의도, 모범답안, 압박 꼬리질문 포함)**가 유기적으로 묶인 **총 3개의 독립 세트**를 엄격히 만드세요.
@@ -663,7 +619,7 @@ if st.button("🚀 면접 패키지 생성 시작"):
         {TEMPLATE_JESIMUN}
         """
     
-    with st.spinner(f"⏳ 로딩중... 생기부 분석 브리핑 및 면접 문항을 정밀 조립하고 있습니다."):
+    with st.spinner(f"⏳ 로딩중... 기출문제 데이터를 학습하여 문항을 정밀 조립하고 있습니다."):
         try:
             result_text = call_gemini(prompt, api_key)
             
@@ -737,7 +693,6 @@ if st.session_state.chat_history:
             
         with st.chat_message("assistant"):
             with st.spinner("요청하신 내용을 처리 중입니다..."):
-                
                 doc_request_words = ["만들어", "생성", "다운", "파일", "문서로", "저장", "그래", "응", "네", "해줘"]
                 is_doc_request = any(w in user_feedback for w in doc_request_words) and len(user_feedback.strip()) < 15
                 
@@ -749,10 +704,7 @@ if st.session_state.chat_history:
                     st.rerun()
                 else:
                     required_template = TEMPLATE_SANGBU if interview_type == "생기부 기반 면접" else TEMPLATE_JESIMUN
-                    
-                    add_instruction = ""
-                    if any(w in user_feedback for w in ["더", "추가", "많이", "늘려", "또"]):
-                        add_instruction = "\n(주의: 사용자가 문항 추가를 요청했으므로, 독립 세트를 **최소 2세트 이상 추가로** 더 생성해 주세요!)"
+                    add_instruction = "\n(주의: 독립 세트를 최소 2세트 이상 추가로 더 생성해 주세요!)" if any(w in user_feedback for w in ["더", "추가", "많이", "늘려", "또"]) else ""
                     
                     feedback_prompt = f"""
                     당신은 면접 출제위원입니다. 이전 내용을 사용자의 피드백에 맞게 수정하되, 
