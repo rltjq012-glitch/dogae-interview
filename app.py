@@ -535,7 +535,14 @@ with st.expander("📖 [클릭] 프로그램 사용 설명서 및 PDF OCR 변환
     """.format(db_status=f"✅ {len(exam_db):,}건 로드 완료 ({exam_db['대학'].nunique() if not exam_db.empty else 0}개 대학)" if not exam_db.empty else "⚠️ master_interview_qa.csv 파일을 찾지 못해 기본 학습 패턴만 사용 중입니다."))
 
 with st.sidebar:
-    api_key = st.text_input("🔑 Gemini API Key", type="password")
+    # Streamlit Cloud의 Secrets(GEMINI_API_KEY)에 키가 등록되어 있으면 자동으로 사용하고,
+    # 없을 경우에만 직접 입력창을 보여줍니다.
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+        st.success("🔑 API 키가 자동으로 연결되었습니다.")
+    except (KeyError, FileNotFoundError, AttributeError):
+        api_key = st.text_input("🔑 Gemini API Key", type="password")
+
     if exam_db.empty:
         st.warning("⚠️ 실제 기출 DB(master_interview_qa.csv)가 없습니다.\n앱과 같은 폴더에 파일을 넣어주세요.")
     else:
