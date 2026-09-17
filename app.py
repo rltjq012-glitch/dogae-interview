@@ -12,6 +12,8 @@ import time
 import pymupdf
 import os
 import re
+import difflib
+import pandas as pd
 from google import genai
 from google.genai import types
 from docx import Document
@@ -159,6 +161,85 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------------
+# [0] 실제 대학 면접 기출 통합 DB (전국 94개 대학 / 약 1.1만 개 질의응답)
+#     master_interview_qa.csv 파일을 app.py와 같은 폴더에 두면 자동으로 로드됩니다.
+# -------------------------------------------------------------------------
+MASTER_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "master_interview_qa.csv")
+
+@st.cache_data(show_spinner=False)
+def load_exam_db(path):
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=["대학", "학과", "전형", "질문", "답변", "원본파일"])
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        df = df.dropna(subset=["질문", "답변"])
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["대학", "학과", "전형", "질문", "답변", "원본파일"])
+
+def _normalize_dept(name):
+    """'간호학과' -> '간호' 처럼 학과명에서 흔한 접미사를 제거해 비교하기 쉽게 만듭니다."""
+    if not isinstance(name, str):
+        return ""
+    s = name.strip()
+    for suf in ["학과", "학부", "전공", "과", "학"]:
+        if s.endswith(suf) and len(s) > len(suf):
+            return s[: -len(suf)]
+    return s
+
+def _normalize_uni(name):
+    if not isinstance(name, str):
+        return ""
+    base = name.split("(")[0].strip()
+    for suf in ["대학교", "대학"]:
+        if base.endswith(suf) and len(base) > len(suf):
+            base = base[: -len(suf)]
+    return base
+
+def get_relevant_examples(df, major, uni_name, top_n=12):
+    """선택한 전공/대학과 가장 유사한 실제 기출 질의응답을 DB에서 골라옵니다."""
+    if df.empty or not major:
+        return df.head(0)
+
+    df = df.copy()
+    major_norm = _normalize_dept(major)
+    df["_dept_norm"] = df["학과"].apply(_normalize_dept)
+
+    exact = df[df["학과"] == major.strip()]
+    partial = df[df["_dept_norm"].apply(lambda d: bool(d) and (d in major_norm or major_norm in d))]
+
+    dept_pool = df["_dept_norm"].dropna().unique().tolist()
+    close = difflib.get_close_matches(major_norm, dept_pool, n=6, cutoff=0.5)
+    fuzzy = df[df["_dept_norm"].isin(close)]
+
+    combined = pd.concat([exact, partial, fuzzy]).drop_duplicates(subset=["대학", "학과", "질문"])
+
+    if combined.empty:
+        # 전공 일치 항목이 전혀 없을 때는 실전 감각을 위해 DB 전체에서 무작위 샘플을 보여줍니다.
+        combined = df.sample(min(top_n, len(df)), random_state=42)
+    else:
+        uni_key = _normalize_uni(uni_name)
+        if uni_key:
+            same_uni = combined[combined["대학"].apply(lambda u: uni_key in _normalize_uni(u))]
+            rest = combined.drop(same_uni.index)
+            combined = pd.concat([same_uni, rest])
+
+    return combined.head(top_n)
+
+def format_examples_for_prompt(examples_df):
+    if examples_df.empty:
+        return ""
+    lines = ["\n[실전 데이터베이스: 지원 전공과 유사한 전국 대학 실제 면접 기출 사례]"]
+    lines.append("(AI는 아래 실제 사례의 질문 난이도, 표현 방식, 꼬리질문 패턴을 참고하되 문장을 그대로 베끼지 말고 새로 창작하세요.)")
+    for _, r in examples_df.iterrows():
+        q = str(r["질문"]).strip().replace("\n", " ")
+        a = str(r["답변"]).strip().replace("\n", " ")
+        if len(a) > 220:
+            a = a[:220] + "..."
+        lines.append(f"- [{r['대학']} · {r['학과']}] Q: {q}\n  A: {a}")
+    return "\n".join(lines)
+
+# -------------------------------------------------------------------------
 # [1] 스마트 PDF 및 제미나이 통신 함수 (텍스트 및 오디오)
 # -------------------------------------------------------------------------
 def extract_text_from_pdf(uploaded_file):
@@ -173,7 +254,7 @@ def call_gemini(prompt, api_key):
         prompt = prompt.decode('utf-8', errors='ignore')
     elif not isinstance(prompt, str):
         prompt = str(prompt)
-        
+
     client = genai.Client(api_key=api_key)
     available_models = []
     try:
@@ -183,10 +264,10 @@ def call_gemini(prompt, api_key):
                 available_models.append(name)
     except:
         available_models = ["gemini-1.5-flash", "gemini-1.5-pro"]
-        
+
     if not available_models: available_models = ["gemini-1.5-flash-latest"]
     models_to_try = sorted(available_models, key=lambda x: "flash" not in x)
-    
+
     last_error = ""
     for target_model in models_to_try[:3]:
         try:
@@ -194,7 +275,7 @@ def call_gemini(prompt, api_key):
             return response.text
         except Exception as e:
             last_error = str(e)
-            time.sleep(2) 
+            time.sleep(2)
     raise Exception(f"AI 모델 통신 실패 (마지막 에러: {last_error})")
 
 def call_gemini_audio_eval(audio_bytes, api_key):
@@ -216,7 +297,7 @@ def call_gemini_audio_eval(audio_bytes, api_key):
         pass
     if not available_models: available_models = ["gemini-1.5-flash-latest", "gemini-1.5-flash"]
     models_to_try = sorted(available_models, key=lambda x: "flash" not in x)
-    
+
     last_error = ""
     for target_model in models_to_try[:3]:
         try:
@@ -243,7 +324,7 @@ def set_cell_background(cell, fill_color):
     shd = OxmlElement('w:shd')
     shd.set(qn('w:val'), 'clear')
     shd.set(qn('w:color'), 'auto')
-    shd.set(qn('w:fill'), fill_color) 
+    shd.set(qn('w:fill'), fill_color)
     tcPr.append(shd)
 
 def set_cell_margins(cell, top=140, bottom=140, left=200, right=200):
@@ -265,7 +346,7 @@ def add_parsed_text_to_cell(cell, text):
     parts = text.split("**")
     for i, part in enumerate(parts):
         run = p.add_run(part)
-        if i % 2 != 0: 
+        if i % 2 != 0:
             run.bold = True
             run.font.color.rgb = RGBColor(0, 51, 102)
 
@@ -291,13 +372,13 @@ def create_word_files(content, student_name, interview_type, target_desc):
     is_jesimun = "제시문" in interview_type
     doc_student = Document()
     doc_teacher = Document()
-    
+
     for doc, is_teacher in [(doc_student, False), (doc_teacher, True)]:
         set_document_font(doc)
         title_text = f"🎓 [{student_name}] {target_desc} 도개고 맞춤 모의면접 {'지침서 (교사용)' if is_teacher else '워크북 (학생용)'}"
         doc.add_heading(title_text, level=1)
         doc.add_paragraph(f"[{type_label}] 본 문서는 도개고등학교 진로진학 지도 기준에 맞춰 생성되었습니다.\n")
-        
+
         briefing_match = re.search(r'(### 🔍 \[생기부 심층 분석 브리핑 리포트\].*?)(?=### 📌|### 📄|$)', content, re.DOTALL)
         if briefing_match:
             add_intro_paragraphs(doc, briefing_match.group(1).strip())
@@ -307,48 +388,48 @@ def create_word_files(content, student_name, interview_type, target_desc):
         for block in blocks[1:]:
             lines = block.strip().split('\n')
             if not lines: continue
-            
+
             title = lines[0].strip()
             body = "\n".join(lines[1:])
             table = doc.add_table(rows=0, cols=1)
-            table.style = 'Table Grid' 
+            table.style = 'Table Grid'
             for row in table.rows:
                 trPr = row._tr.get_or_add_trPr()
                 trPr.append(OxmlElement('w:cantSplit'))
-            
+
             row_title = table.add_row()
             cell_title = row_title.cells[0]
             set_cell_background(cell_title, "EBF1FA")
             add_parsed_text_to_cell(cell_title, f"📌 {title}")
-            
+
             if is_jesimun:
                 js_match = re.search(r'\[제시문\](.*?)(?=\[문제 1\]|$)', body, re.DOTALL)
                 q1_match = re.search(r'\[문제 1\](.*?)(?=\[평가의도 1\]|\[문제 2\]|$)', body, re.DOTALL)
                 i1_match = re.search(r'\[평가의도 1\](.*?)(?=\[모범답안 1\]|$)', body, re.DOTALL)
                 a1_match = re.search(r'\[모범답안 1\](.*?)(?=\[꼬리질문 1\]|$)', body, re.DOTALL)
                 f1_match = re.search(r'\[꼬리질문 1\](.*?)(?=\[문제 2\]|$)', body, re.DOTALL)
-                
+
                 q2_match = re.search(r'\[문제 2\](.*?)(?=\[평가의도 2\]|$)', body, re.DOTALL)
                 i2_match = re.search(r'\[평가의도 2\](.*?)(?=\[모범답안 2\]|$)', body, re.DOTALL)
                 a2_match = re.search(r'\[모범답안 2\](.*?)(?=\[꼬리질문 2\]|$)', body, re.DOTALL)
                 f2_match = re.search(r'\[꼬리질문 2\](.*?)(?=$)', body, re.DOTALL)
-                
+
                 js_text = js_match.group(1).strip() if js_match else ""
                 q1_text = q1_match.group(1).strip() if q1_match else ""
                 i1_text = i1_match.group(1).strip() if i1_match else ""
                 a1_text = a1_match.group(1).strip() if a1_match else ""
                 f1_text = f1_match.group(1).strip() if f1_match else ""
-                
+
                 q2_text = q2_match.group(1).strip() if q2_match else ""
                 i2_text = i2_match.group(1).strip() if i2_match else ""
                 a2_text = a2_match.group(1).strip() if a2_match else ""
                 f2_text = f2_match.group(1).strip() if f2_match else ""
-                
+
                 if js_text:
                     row_js = table.add_row()
                     set_cell_background(row_js.cells[0], "F4F6F9")
                     add_parsed_text_to_cell(row_js.cells[0], f"**[서울대 스타일 구술 제시문 (가, 나, 다)]**\n{js_text}")
-                
+
                 row_q1 = table.add_row()
                 add_parsed_text_to_cell(row_q1.cells[0], f"**[문제 1]**\n{q1_text}")
                 if is_teacher:
@@ -360,7 +441,7 @@ def create_word_files(content, student_name, interview_type, target_desc):
                     row_f1 = table.add_row()
                     set_cell_background(row_f1.cells[0], "FFF4F4")
                     add_parsed_text_to_cell(row_f1.cells[0], f"**[압박용 꼬리질문 1]**\n{f1_text}")
-                
+
                 if q2_text:
                     row_q2 = table.add_row()
                     add_parsed_text_to_cell(row_q2.cells[0], f"**[문제 2]**\n{q2_text}")
@@ -378,15 +459,15 @@ def create_word_files(content, student_name, interview_type, target_desc):
                 i_match = re.search(r'\[평가의도\](.*?)(?=\[모범답안\]|\[꼬리질문\]|$)', body, re.DOTALL)
                 a_match = re.search(r'\[모범답안\](.*?)(?=\[꼬리질문\]|$)', body, re.DOTALL)
                 f_match = re.search(r'\[꼬리질문\](.*?)(?=$)', body, re.DOTALL)
-                
+
                 q_text = q_match.group(1).strip() if q_match else "내용 없음"
                 i_text = i_match.group(1).strip() if i_match else ""
                 a_text = a_match.group(1).strip() if a_match else ""
                 f_text = f_match.group(1).strip() if f_match else ""
-                
+
                 row_q = table.add_row()
                 add_parsed_text_to_cell(row_q.cells[0], f"**[면접 질문]**\n{q_text}")
-                
+
                 if is_teacher:
                     row_i = table.add_row()
                     set_cell_background(row_i.cells[0], "F9F9F9")
@@ -396,7 +477,7 @@ def create_word_files(content, student_name, interview_type, target_desc):
                     row_f = table.add_row()
                     set_cell_background(row_f.cells[0], "FFF4F4")
                     add_parsed_text_to_cell(row_f.cells[0], f"**[압박용 꼬리질문]**\n{f_text}")
-            doc.add_paragraph() 
+            doc.add_paragraph()
 
     student_path = f"{student_name}_{target_desc}_{type_label}_학생용.docx"
     teacher_path = f"{student_name}_{target_desc}_{type_label}_교사용.docx"
@@ -429,6 +510,10 @@ def create_chat_history_word(chat_history, student_name):
 if "chat_history" not in st.session_state: st.session_state.chat_history = []
 if "word_files" not in st.session_state: st.session_state.word_files = None
 if "last_audio_size" not in st.session_state: st.session_state.last_audio_size = 0
+if "last_result_text" not in st.session_state: st.session_state.last_result_text = ""
+if "last_examples" not in st.session_state: st.session_state.last_examples = None
+
+exam_db = load_exam_db(MASTER_DB_PATH)
 
 with st.expander("📖 [클릭] 프로그램 사용 설명서 및 PDF OCR 변환 방법", expanded=False):
     st.markdown("""
@@ -443,14 +528,22 @@ with st.expander("📖 [클릭] 프로그램 사용 설명서 및 PDF OCR 변환
     ### 🎙️ [신규] 휴대폰 음성 인식(STT) 면접 평가 기능 사용법!
     * **1단계 (키보드 활용):** 휴대폰으로 접속 시, 하단 채팅창을 누른 후 **휴대폰 키보드에 있는 '마이크(🎤)' 버튼**을 누르고 말하면 텍스트로 바로 입력됩니다.
     * **2단계 (무인 AI 면접관 모드):** 하단의 **[🎙️ 음성으로 면접 답변하기]** 버튼을 눌러 직접 녹음해 보세요. AI가 음성을 듣고 즉각적인 평가와 꼬리질문을 던져줍니다!
-    """)
+
+    ### 📊 [신규] 전국 94개 대학 실제 면접 기출 데이터베이스 연동!
+    * `master_interview_qa.csv` 파일을 이 앱과 같은 폴더에 넣어두면, 지원 학과와 가장 유사한 **실제 대학 기출 질의응답 약 1.1만 건**을 자동으로 찾아 문항 생성에 참고합니다.
+    * 현재 DB 로딩 상태: **{db_status}**
+    """.format(db_status=f"✅ {len(exam_db):,}건 로드 완료 ({exam_db['대학'].nunique() if not exam_db.empty else 0}개 대학)" if not exam_db.empty else "⚠️ master_interview_qa.csv 파일을 찾지 못해 기본 학습 패턴만 사용 중입니다."))
 
 with st.sidebar:
     api_key = st.text_input("🔑 Gemini API Key", type="password")
+    if exam_db.empty:
+        st.warning("⚠️ 실제 기출 DB(master_interview_qa.csv)가 없습니다.\n앱과 같은 폴더에 파일을 넣어주세요.")
+    else:
+        st.success(f"📊 실제 기출 DB 연동됨\n{len(exam_db):,}건 / {exam_db['대학'].nunique()}개 대학")
 
 UNIVERSITIES = {
-    "서울권": ["서울대", "연세대", "고려대", "성균관대", "서강대", "한양대", "중앙대", "경희대", "한국외대", "서울시립대", "이화여대"], 
-    "충청권": ["카이스트(KAIST)", "충남대", "충북대", "고려대(세종)"], 
+    "서울권": ["서울대", "연세대", "고려대", "성균관대", "서강대", "한양대", "중앙대", "경희대", "한국외대", "서울시립대", "이화여대"],
+    "충청권": ["카이스트(KAIST)", "충남대", "충북대", "고려대(세종)"],
     "경상권": ["경북대", "부산대", "UNIST", "영남대", "계명대"]
 }
 
@@ -473,7 +566,7 @@ st.markdown("---")
 # -------------------------------------------------------------------------
 # [4] 데이터 기반 프롬프트 및 생성 로직
 # -------------------------------------------------------------------------
-target_desc = f"{uni}_{major}" 
+target_desc = f"{uni}_{major}"
 
 # 🔥 선생님이 주신 20종 기출문제 빅데이터 패턴 완벽 통합 (프롬프트 주입용) 🔥
 PAST_EXAM_DATA = """
@@ -582,62 +675,78 @@ if st.button("🚀 면접 패키지 생성 시작"):
     if not api_key: st.error("API 키를 입력해 주세요."); st.stop()
     if not major: st.error("지원 학과를 입력해 주세요."); st.stop()
     if interview_type == "생기부 기반 면접" and not uploaded_file: st.error("생기부 파일을 업로드해 주세요."); st.stop()
-        
+
     student_record = extract_text_from_pdf(uploaded_file) if uploaded_file else ""
-    
+
+    # 🔎 실제 기출 DB에서 지원 학과와 유사한 사례를 찾아 프롬프트에 결합
+    relevant_examples = get_relevant_examples(exam_db, major, uni, top_n=12)
+    dynamic_exam_text = format_examples_for_prompt(relevant_examples)
+    combined_exam_data = PAST_EXAM_DATA + ("\n" + dynamic_exam_text if dynamic_exam_text else "")
+    st.session_state.last_examples = relevant_examples
+
     if interview_type == "생기부 기반 면접":
         prompt = f"""
-        당신은 도개고등학교의 진학 지도 노하우와 {uni} {major} 입학사정관의 시각을 겸비한 최고급 면접 출제위원입니다. 
+        당신은 도개고등학교의 진학 지도 노하우와 {uni} {major} 입학사정관의 시각을 겸비한 최고급 면접 출제위원입니다.
         지원자 '{student_name}' 학생의 생기부를 면밀히 분석하여 다음 작업을 수행하세요.
-        
-        {PAST_EXAM_DATA}
-        
+
+        {combined_exam_data}
+
         [지시사항]
         1. **출력의 맨 첫 부분**에 반드시 **[생기부 심층 분석 브리핑 리포트]**를 작성하세요. 단순 요약이 아닌, 실제 입학사정관의 눈으로 학생의 생기부를 현미경처럼 해부하여 구체적인 활동명과 과목명을 직접 언급하며 **매우 디테일하고 상세하게 분량 있게** 분석해야 합니다. 단점 방어 전략도 필수로 기재하세요.
         2. 생기부 5대 영역(교과세특, 창체, 동아리, 행특, 독서 등)을 모두 분석하여 총 5세트의 면접 문항을 만드세요.
         3. 과목명이나 주요 활동명은 반드시 **[생활과 윤리]** 처럼 볼드체로 묶어주고 학습된 기출 데이터 패턴 수준의 날카로운 꼬리질문을 포함하세요.
-        
+        4. 위 [실전 데이터베이스]에 제시된 실제 사례가 있다면, 그 질문의 깊이와 화법을 반드시 참고하여 이 학생의 활동에 맞게 재창작하세요.
+
         [출력 템플릿 엄수 - 파싱을 위해 키워드 대괄호를 절대 변경하지 마세요]
         {TEMPLATE_SANGBU}
-        
+
         [생기부 내용]
         {student_record}
         """
-    else: 
+    else:
         prompt = f"""
         당신은 서울대학교 면접 및 구술고사 출제위원입니다. {major} 전공적합성과 종합적 사고력, 논리적 추론 능력을 평가하기 위한 고난도 제시문 기반 구술고사를 출제하세요.
         면접 난이도: {difficulty}
-        
-        {PAST_EXAM_DATA}
-        
+
+        {combined_exam_data}
+
         [지시사항]
         1. 생기부 내용은 무시하세요. {major} 학과와 관련된 학술적 딜레마와 심층 개념을 담은 **완전 독립된 3개의 주제 세트**를 창작하세요.
         2. **각 세트마다 복수의 제시문((가), (나), (다) 형태)과 [문제 1], [문제 2] (각각 평가의도, 모범답안, 압박 꼬리질문 포함)**가 유기적으로 묶인 **총 3개의 독립 세트**를 엄격히 만드세요.
-        3. 서론이나 인사말은 절대 쓰지 말고, 바로 '### 📌 [세트 1]' 부터 출력하세요.
-        
+        3. 위 [실전 데이터베이스]의 실제 사례가 있다면 질문의 수준과 화법을 참고해 {major}에 맞게 새로 창작하세요.
+        4. 서론이나 인사말은 절대 쓰지 말고, 바로 '### 📌 [세트 1]' 부터 출력하세요.
+
         [출력 템플릿 엄수 - 파싱을 위해 키워드 대괄호를 절대 변경하지 마세요]
         {TEMPLATE_JESIMUN}
         """
-    
-    with st.spinner(f"⏳ 로딩중... 기출문제 데이터를 학습하여 문항을 정밀 조립하고 있습니다."):
+
+    with st.spinner(f"⏳ 로딩중... 실제 기출 DB {len(relevant_examples)}건을 참고하여 문항을 정밀 조립하고 있습니다."):
         try:
             result_text = call_gemini(prompt, api_key)
-            
+            st.session_state.last_result_text = result_text
+
             stu_path, tea_path = create_word_files(result_text, student_name, interview_type, target_desc)
             st.session_state.word_files = (stu_path, tea_path)
-            
+
             display_text = result_text.replace('[문제 1]', '\n**💡 [문제 1]**\n').replace('[평가의도 1]', '\n**🎯 [평가 의도 1]**\n').replace('[모범답안 1]', '\n**✅ [모범 답안 가이드 1]**\n').replace('[꼬리질문 1]', '\n**🔥 [압박용 꼬리질문 1]**\n')
             display_text = display_text.replace('[문제 2]', '\n**💡 [문제 2]**\n').replace('[평가의도 2]', '\n**🎯 [평가 의도 2]**\n').replace('[모범답안 2]', '\n**✅ [모범 답안 가이드 2]**\n').replace('[꼬리질문 2]', '\n**🔥 [압박용 꼬리질문 2]**\n')
             display_text = display_text.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n')
             display_text = display_text.replace('[제시문]', '\n**📄 [서울대 스타일 구술 제시문 (가, 나, 다)]**\n')
-            
+
             full_display_text = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)"
-            
+
             st.session_state.chat_history = [{"role": "assistant", "content": full_display_text}]
             st.success("🎉 면접 패키지 및 워드 문서 생성이 완료되었습니다!")
-            
+
         except Exception as e:
             st.error(f"❌ 생성 실패: {e}")
+
+# 이번 생성에 실제로 참고된 기출 사례를 투명하게 보여줌
+if st.session_state.get("last_examples") is not None and not st.session_state.last_examples.empty:
+    with st.expander(f"🔎 이번 문항 생성에 참고한 실제 기출 사례 보기 ({len(st.session_state.last_examples)}건)", expanded=False):
+        for _, r in st.session_state.last_examples.iterrows():
+            st.markdown(f"**[{r['대학']} · {r['학과']}]** {r['질문']}")
+            st.caption(str(r['답변'])[:200] + ("..." if len(str(r['답변'])) > 200 else ""))
 
 # -------------------------------------------------------------------------
 # [5] 결과 대시보드 및 실시간 피드백
@@ -645,11 +754,11 @@ if st.button("🚀 면접 패키지 생성 시작"):
 if st.session_state.chat_history:
     st.markdown("<div class='step-text'>STEP 2 · 결과 확인 및 피드백</div>", unsafe_allow_html=True)
     st.markdown("## 📋 면접 문항 대시보드 및 실시간 피드백")
-    
+
     if st.session_state.word_files:
         stu_path, tea_path = st.session_state.word_files
         chat_path = create_chat_history_word(st.session_state.chat_history, student_name)
-        
+
         col_w1, col_w2, col_w3 = st.columns(3)
         with col_w1:
             with open(stu_path, "rb") as f:
@@ -660,17 +769,17 @@ if st.session_state.chat_history:
         with col_w3:
             with open(chat_path, "rb") as f:
                 st.download_button("💬 피드백 대화 내역 (.docx)", f, file_name=chat_path, use_container_width=True)
-    
+
     st.divider()
-    
+
     for message in st.session_state.chat_history:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
-            
+
     st.markdown("💡 **Tip:** 아래 채팅창에서 📱휴대폰 키보드 마이크(🎤)를 눌러 말하거나, 우측 🎙️ 녹음 버튼을 활용해 보세요!")
-    
+
     audio_value = st.audio_input("🎙️ 음성으로 면접 답변하기 (녹음 버튼을 누르고 답변을 말해보세요!)")
-    
+
     if audio_value is not None:
         if st.session_state.last_audio_size != audio_value.size:
             if not api_key:
@@ -679,10 +788,10 @@ if st.session_state.chat_history:
                 with st.spinner("AI 면접관이 학생의 음성을 분석하고 답변을 평가 중입니다..."):
                     audio_bytes = audio_value.read()
                     eval_result = call_gemini_audio_eval(audio_bytes, api_key)
-                    
+
                     st.session_state.chat_history.append({"role": "user", "content": "[🎙️ 음성 답변 제출 완료]"})
                     st.session_state.chat_history.append({"role": "assistant", "content": eval_result})
-                    
+
                     st.session_state.last_audio_size = audio_value.size
                     st.rerun()
 
@@ -690,12 +799,12 @@ if st.session_state.chat_history:
         st.session_state.chat_history.append({"role": "user", "content": user_feedback})
         with st.chat_message("user"):
             st.markdown(user_feedback)
-            
+
         with st.chat_message("assistant"):
             with st.spinner("요청하신 내용을 처리 중입니다..."):
                 doc_request_words = ["만들어", "생성", "다운", "파일", "문서로", "저장", "그래", "응", "네", "해줘"]
                 is_doc_request = any(w in user_feedback for w in doc_request_words) and len(user_feedback.strip()) < 15
-                
+
                 if is_doc_request:
                     chat_path = create_chat_history_word(st.session_state.chat_history, student_name)
                     response_text = "네! 지금까지 나눈 대화 내용을 깔끔한 워드 문서로 생성했습니다. 상단 또는 아래의 **'💬 피드백 대화 내역 (.docx)'** 다운로드 버튼을 클릭해 주세요!"
@@ -705,32 +814,40 @@ if st.session_state.chat_history:
                 else:
                     required_template = TEMPLATE_SANGBU if interview_type == "생기부 기반 면접" else TEMPLATE_JESIMUN
                     add_instruction = "\n(주의: 독립 세트를 최소 2세트 이상 추가로 더 생성해 주세요!)" if any(w in user_feedback for w in ["더", "추가", "많이", "늘려", "또"]) else ""
-                    
+
+                    # 이전에 생성했던 문항 원문을 함께 넘겨서 "무엇을 수정해야 하는지" AI가 알 수 있게 함
+                    previous_content = st.session_state.get("last_result_text", "")
+
                     feedback_prompt = f"""
-                    당신은 면접 출제위원입니다. 이전 내용을 사용자의 피드백에 맞게 수정하되, 
+                    당신은 면접 출제위원입니다. 아래는 방금 전 당신이 생성했던 면접 문항 원문입니다.
+                    사용자의 피드백에 맞게 이 내용을 수정/보완하되,
                     심도 있는 학술적/실천적 깊이를 유지하면서 **반드시 다음 템플릿 구조와 [키워드]를 토씨 하나 틀리지 말고 유지**해 주세요.
                     {add_instruction}
-                    
+
+                    [직전에 생성했던 문항 원문]
+                    {previous_content}
+
                     [강제 유지 템플릿]
                     {required_template}
-                    
+
                     사용자 피드백: "{user_feedback}"
                     """
                     try:
                         new_result = call_gemini(feedback_prompt, api_key)
+                        st.session_state.last_result_text = new_result
                         display_text = new_result.replace('[문제 1]', '\n**💡 [문제 1]**\n').replace('[평가의도 1]', '\n**🎯 [평가 의도 1]**\n').replace('[모범답안 1]', '\n**✅ [모범 답안 가이드 1]**\n').replace('[꼬리질문 1]', '\n**🔥 [압박용 꼬리질문 1]**\n')
                         display_text = display_text.replace('[문제 2]', '\n**💡 [문제 2]**\n').replace('[평가의도 2]', '\n**🎯 [평가 의도 2]**\n').replace('[모범답안 2]', '\n**✅ [모범 답안 가이드 2]**\n').replace('[꼬리질문 2]', '\n**🔥 [압박용 꼬리질문 2]**\n')
                         display_text = display_text.replace('[질문]', '\n**💡 [면접 질문]**\n').replace('[평가의도]', '\n**🎯 [평가 의도]**\n').replace('[모범답안]', '\n**✅ [모범 답안 가이드]**\n').replace('[꼬리질문]', '\n**🔥 [압박용 꼬리질문]**\n')
                         display_text = display_text.replace('[제시문]', '\n**📄 [서울대 스타일 구술 제시문 (가, 나, 다)]**\n')
-                        
+
                         full_response = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)"
-                        
+
                         st.markdown(full_response)
                         st.session_state.chat_history.append({"role": "assistant", "content": full_response})
-                        
+
                         stu_path, tea_path = create_word_files(new_result, student_name, interview_type, target_desc)
                         st.session_state.word_files = (stu_path, tea_path)
-                        st.rerun() 
-                        
+                        st.rerun()
+
                     except Exception as e:
                         st.error(f"피드백 반영 중 오류가 발생했습니다: {e}")
