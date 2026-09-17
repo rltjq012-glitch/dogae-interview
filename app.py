@@ -13,6 +13,10 @@ import pymupdf
 import os
 import re
 import difflib
+import sqlite3
+import json
+import uuid
+import datetime
 import pandas as pd
 from google import genai
 from google.genai import types
@@ -238,6 +242,84 @@ def format_examples_for_prompt(examples_df):
             a = a[:220] + "..."
         lines.append(f"- [{r['대학']} · {r['학과']}] Q: {q}\n  A: {a}")
     return "\n".join(lines)
+
+# -------------------------------------------------------------------------
+# [0-1] 학생별 저장/불러오기 DB (SQLite)
+#   - 생기부 텍스트, 생성된 문항, 대화 내역을 저장해두고 다음에 다시 열었을 때
+#     PDF를 재업로드하지 않고 이어서 볼 수 있게 합니다.
+#   - 주의: 배포 환경(Streamlit Cloud 등)에서 앱을 재배포(git push)하거나
+#     컨테이너가 완전히 재생성되면 이 파일도 초기화될 수 있습니다.
+#     장기 보관이 꼭 필요하면 외부 DB(예: Supabase, Google Sheets 연동)로 옮기는 것을 권장합니다.
+# -------------------------------------------------------------------------
+RECORDS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "interview_records.db")
+
+def init_records_db():
+    conn = sqlite3.connect(RECORDS_DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS records (
+            id TEXT PRIMARY KEY,
+            student_name TEXT,
+            university TEXT,
+            major TEXT,
+            interview_type TEXT,
+            difficulty TEXT,
+            student_record_text TEXT,
+            result_text TEXT,
+            chat_history TEXT,
+            updated_at TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_record(record_id, student_name, university, major, interview_type, difficulty,
+                 student_record_text, result_text, chat_history):
+    conn = sqlite3.connect(RECORDS_DB_PATH)
+    conn.execute("""
+        INSERT INTO records (id, student_name, university, major, interview_type, difficulty,
+                              student_record_text, result_text, chat_history, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            student_name=excluded.student_name,
+            university=excluded.university,
+            major=excluded.major,
+            interview_type=excluded.interview_type,
+            difficulty=excluded.difficulty,
+            student_record_text=excluded.student_record_text,
+            result_text=excluded.result_text,
+            chat_history=excluded.chat_history,
+            updated_at=excluded.updated_at
+    """, (
+        record_id, student_name, university, major, interview_type, difficulty,
+        student_record_text, result_text, json.dumps(chat_history, ensure_ascii=False),
+        datetime.datetime.now().isoformat(timespec="seconds")
+    ))
+    conn.commit()
+    conn.close()
+
+def list_records():
+    conn = sqlite3.connect(RECORDS_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id, student_name, university, major, interview_type, updated_at FROM records ORDER BY updated_at DESC"
+    ).fetchall()
+    conn.close()
+    return rows
+
+def get_record(record_id):
+    conn = sqlite3.connect(RECORDS_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM records WHERE id = ?", (record_id,)).fetchone()
+    conn.close()
+    return row
+
+def delete_record(record_id):
+    conn = sqlite3.connect(RECORDS_DB_PATH)
+    conn.execute("DELETE FROM records WHERE id = ?", (record_id,))
+    conn.commit()
+    conn.close()
+
+init_records_db()
 
 # -------------------------------------------------------------------------
 # [1] 스마트 PDF 및 제미나이 통신 함수 (텍스트 및 오디오)
@@ -512,8 +594,53 @@ if "word_files" not in st.session_state: st.session_state.word_files = None
 if "last_audio_size" not in st.session_state: st.session_state.last_audio_size = 0
 if "last_result_text" not in st.session_state: st.session_state.last_result_text = ""
 if "last_examples" not in st.session_state: st.session_state.last_examples = None
+if "current_record_id" not in st.session_state: st.session_state.current_record_id = None
+if "loaded_student_record_text" not in st.session_state: st.session_state.loaded_student_record_text = ""
 
 exam_db = load_exam_db(MASTER_DB_PATH)
+
+# -------------------------------------------------------------------------
+# 📂 저장된 학생 기록 불러오기 (PDF 재업로드 없이 이전 작업 이어서 하기)
+# -------------------------------------------------------------------------
+with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=False):
+    saved_records = list_records()
+    if not saved_records:
+        st.caption("아직 저장된 기록이 없습니다. 문항을 한 번 생성하면 이 학생의 생기부·문항·대화가 자동으로 저장됩니다.")
+    else:
+        record_options = {
+            f"{r['student_name']} · {r['university']}_{r['major']} ({r['interview_type']}) — "
+            f"{r['updated_at'][:16].replace('T', ' ')}": r["id"]
+            for r in saved_records
+        }
+        selected_label = st.selectbox("불러올 기록을 선택하세요", list(record_options.keys()), key="record_select_box")
+        col_load, col_delete = st.columns(2)
+        with col_load:
+            if st.button("📥 이 기록 불러오기", use_container_width=True):
+                row = get_record(record_options[selected_label])
+                if row:
+                    st.session_state["region_select"] = "직접 입력"
+                    st.session_state["uni_direct_input"] = row["university"]
+                    st.session_state["major_input"] = row["major"]
+                    st.session_state["student_name_input"] = row["student_name"]
+                    st.session_state["interview_type_radio"] = row["interview_type"]
+                    st.session_state["difficulty_radio"] = row["difficulty"] or "중 (표준)"
+                    st.session_state["loaded_student_record_text"] = row["student_record_text"] or ""
+                    st.session_state["last_result_text"] = row["result_text"] or ""
+                    st.session_state["chat_history"] = json.loads(row["chat_history"]) if row["chat_history"] else []
+                    st.session_state["current_record_id"] = row["id"]
+                    if row["result_text"]:
+                        stu_path, tea_path = create_word_files(
+                            row["result_text"], row["student_name"], row["interview_type"],
+                            f"{row['university']}_{row['major']}"
+                        )
+                        st.session_state["word_files"] = (stu_path, tea_path)
+                    st.success(f"'{row['student_name']}' 학생의 기록을 불러왔습니다. PDF를 다시 업로드하지 않아도 이어서 진행할 수 있습니다.")
+                    st.rerun()
+        with col_delete:
+            if st.button("🗑️ 이 기록 삭제", use_container_width=True):
+                delete_record(record_options[selected_label])
+                st.success("삭제되었습니다.")
+                st.rerun()
 
 with st.expander("📖 [클릭] 프로그램 사용 설명서 및 PDF OCR 변환 방법", expanded=False):
     st.markdown("""
@@ -532,6 +659,11 @@ with st.expander("📖 [클릭] 프로그램 사용 설명서 및 PDF OCR 변환
     ### 📊 [신규] 전국 94개 대학 실제 면접 기출 데이터베이스 연동!
     * `master_interview_qa.csv` 파일을 이 앱과 같은 폴더에 넣어두면, 지원 학과와 가장 유사한 **실제 대학 기출 질의응답 약 1.1만 건**을 자동으로 찾아 문항 생성에 참고합니다.
     * 현재 DB 로딩 상태: **{db_status}**
+
+    ### 💾 [신규] 학생 기록 자동 저장 및 불러오기
+    * 문항을 한 번 생성하면 해당 학생의 **생기부 텍스트 · 생성된 문항 · 피드백 대화 내역**이 자동으로 저장됩니다.
+    * 다음에 다시 접속했을 때는 위쪽 **'📂 저장된 학생 기록 불러오기'**에서 이름을 선택해 불러오면, PDF를 다시 업로드하지 않고 이어서 진행할 수 있습니다.
+    * ⚠️ 단, 이 저장 방식은 앱이 실행 중인 서버의 파일에 저장되는 방식입니다. 앱을 재배포(GitHub에 새로 커밋)하거나 서버가 완전히 재시작되면 저장된 기록이 초기화될 수 있으니, 중요한 학생 기록은 워드 파일로 다운로드해 별도 보관하시길 권장합니다.
     """.format(db_status=f"✅ {len(exam_db):,}건 로드 완료 ({exam_db['대학'].nunique() if not exam_db.empty else 0}개 대학)" if not exam_db.empty else "⚠️ master_interview_qa.csv 파일을 찾지 못해 기본 학습 패턴만 사용 중입니다."))
 
 with st.sidebar:
@@ -556,17 +688,22 @@ UNIVERSITIES = {
 
 col1, col2 = st.columns(2)
 with col1:
-    interview_type = st.radio("🎯 면접 방식", ["생기부 기반 면접", "상위권 대학 제시문 기반 면접"], horizontal=True)
-    region = st.selectbox("📍 권역 선택", ["서울권", "충청권", "경상권", "직접 입력"])
-    uni = st.text_input("🏫 대학 직접 입력", value="한국대") if region == "직접 입력" else st.selectbox("🏫 대학 선택", UNIVERSITIES[region])
+    interview_type = st.radio("🎯 면접 방식", ["생기부 기반 면접", "상위권 대학 제시문 기반 면접"], horizontal=True, key="interview_type_radio")
+    region = st.selectbox("📍 권역 선택", ["서울권", "충청권", "경상권", "직접 입력"], key="region_select")
+    uni = st.text_input("🏫 대학 직접 입력", value="한국대", key="uni_direct_input") if region == "직접 입력" else st.selectbox("🏫 대학 선택", UNIVERSITIES[region], key="uni_select")
 with col2:
-    major = st.text_input("🎓 지원 학과/전공", placeholder="예: 철학과")
-    student_name = st.text_input("👤 지원자 성명", value="김기섭")
-    difficulty = st.radio("⚙️ 난이도 선택", ["하 (기초)", "중 (표준)", "상 (압박)"], horizontal=True, index=1)
+    major = st.text_input("🎓 지원 학과/전공", placeholder="예: 철학과", key="major_input")
+    student_name = st.text_input("👤 지원자 성명", value="김기섭", key="student_name_input")
+    difficulty = st.radio("⚙️ 난이도 선택", ["하 (기초)", "중 (표준)", "상 (압박)"], horizontal=True, index=1, key="difficulty_radio")
 
 uploaded_file = None
 if interview_type == "생기부 기반 면접":
-    uploaded_file = st.file_uploader("📂 학생 생기부 PDF 업로드 (OCR 변환 필수)", type=["pdf"])
+    uploaded_file = st.file_uploader(
+        "📂 학생 생기부 PDF 업로드 (OCR 변환 필수 · 위에서 기존 기록을 불러왔다면 다시 올리지 않아도 됩니다)",
+        type=["pdf"]
+    )
+    if st.session_state.get("loaded_student_record_text") and not uploaded_file:
+        st.info("📌 불러온 학생의 생기부 텍스트를 그대로 사용합니다. 다른 PDF를 새로 올리면 그것으로 대체됩니다.")
 
 st.markdown("---")
 
@@ -681,9 +818,12 @@ TEMPLATE_JESIMUN = """
 if st.button("🚀 면접 패키지 생성 시작"):
     if not api_key: st.error("API 키를 입력해 주세요."); st.stop()
     if not major: st.error("지원 학과를 입력해 주세요."); st.stop()
-    if interview_type == "생기부 기반 면접" and not uploaded_file: st.error("생기부 파일을 업로드해 주세요."); st.stop()
+    if interview_type == "생기부 기반 면접" and not uploaded_file and not st.session_state.get("loaded_student_record_text"):
+        st.error("생기부 파일을 업로드하거나, 위에서 저장된 기록을 먼저 불러와 주세요.")
+        st.stop()
 
-    student_record = extract_text_from_pdf(uploaded_file) if uploaded_file else ""
+    student_record = extract_text_from_pdf(uploaded_file) if uploaded_file else st.session_state.get("loaded_student_record_text", "")
+    st.session_state.loaded_student_record_text = student_record
 
     # 🔎 실제 기출 DB에서 지원 학과와 유사한 사례를 찾아 프롬프트에 결합
     relevant_examples = get_relevant_examples(exam_db, major, uni, top_n=12)
@@ -743,7 +883,16 @@ if st.button("🚀 면접 패키지 생성 시작"):
             full_display_text = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)"
 
             st.session_state.chat_history = [{"role": "assistant", "content": full_display_text}]
-            st.success("🎉 면접 패키지 및 워드 문서 생성이 완료되었습니다!")
+
+            # 📌 이 학생의 생기부·문항·대화를 저장해서, 다음에 다시 열어도 이어서 볼 수 있게 함
+            if not st.session_state.get("current_record_id"):
+                st.session_state.current_record_id = str(uuid.uuid4())
+            save_record(
+                st.session_state.current_record_id, student_name, uni, major, interview_type, difficulty,
+                student_record, result_text, st.session_state.chat_history
+            )
+
+            st.success("🎉 면접 패키지 및 워드 문서 생성이 완료되었습니다! (이 학생 기록은 자동 저장되었습니다)")
 
         except Exception as e:
             st.error(f"❌ 생성 실패: {e}")
@@ -800,6 +949,14 @@ if st.session_state.chat_history:
                     st.session_state.chat_history.append({"role": "assistant", "content": eval_result})
 
                     st.session_state.last_audio_size = audio_value.size
+
+                    if st.session_state.get("current_record_id"):
+                        save_record(
+                            st.session_state.current_record_id, student_name, uni, major, interview_type, difficulty,
+                            st.session_state.get("loaded_student_record_text", ""),
+                            st.session_state.get("last_result_text", ""), st.session_state.chat_history
+                        )
+
                     st.rerun()
 
     if user_feedback := st.chat_input("질문을 더 어렵게 하거나 답변을 입력해보세요 (키보드 마이크🎤 활용 가능)"):
@@ -854,6 +1011,14 @@ if st.session_state.chat_history:
 
                         stu_path, tea_path = create_word_files(new_result, student_name, interview_type, target_desc)
                         st.session_state.word_files = (stu_path, tea_path)
+
+                        if st.session_state.get("current_record_id"):
+                            save_record(
+                                st.session_state.current_record_id, student_name, uni, major, interview_type, difficulty,
+                                st.session_state.get("loaded_student_record_text", ""),
+                                new_result, st.session_state.chat_history
+                            )
+
                         st.rerun()
 
                     except Exception as e:
