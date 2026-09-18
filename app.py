@@ -17,6 +17,7 @@ import sqlite3
 import json
 import uuid
 import datetime
+import requests
 import pandas as pd
 from google import genai
 from google.genai import types
@@ -244,51 +245,70 @@ def format_examples_for_prompt(examples_df):
     return "\n".join(lines)
 
 # -------------------------------------------------------------------------
-# [0-1] 학생별 저장/불러오기 DB (SQLite)
+# [0-1] 학생별 저장/불러오기 저장소
 #   - 생기부 텍스트, 생성된 문항, 대화 내역을 저장해두고 다음에 다시 열었을 때
 #     PDF를 재업로드하지 않고 이어서 볼 수 있게 합니다.
-#   - 주의: 배포 환경(Streamlit Cloud 등)에서 앱을 재배포(git push)하거나
-#     컨테이너가 완전히 재생성되면 이 파일도 초기화될 수 있습니다.
-#     장기 보관이 꼭 필요하면 외부 DB(예: Supabase, Google Sheets 연동)로 옮기는 것을 권장합니다.
+#   - Streamlit Secrets에 구글 서비스 계정("gcp_service_account")이 등록되어 있으면
+#     Google Sheets에 반영구적으로 저장합니다(앱이 재배포돼도 사라지지 않음).
+#   - 등록되어 있지 않으면 예전처럼 로컬 SQLite 파일에 저장합니다(재배포 시 초기화될 수 있음).
 # -------------------------------------------------------------------------
+RECORD_COLUMNS = [
+    "id", "student_name", "university", "major", "interview_type",
+    "difficulty", "student_record_text", "result_text", "chat_history", "updated_at"
+]
 RECORDS_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "interview_records.db")
+GOOGLE_SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 
+def _sheets_enabled():
+    try:
+        return "gcp_service_account" in st.secrets
+    except Exception:
+        return False
+
+@st.cache_resource(show_spinner=False)
+def _get_records_worksheet():
+    import gspread
+    from google.oauth2.service_account import Credentials
+
+    creds = Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=GOOGLE_SHEET_SCOPES)
+    client = gspread.authorize(creds)
+    sheet_name = st.secrets.get("GOOGLE_SHEET_NAME", "도개고_면접기록_DB")
+    try:
+        sh = client.open(sheet_name)
+    except gspread.SpreadsheetNotFound:
+        sh = client.create(sheet_name)
+    try:
+        ws = sh.worksheet("records")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="records", rows=2000, cols=len(RECORD_COLUMNS))
+        ws.append_row(RECORD_COLUMNS)
+    return ws
+
+# ---- SQLite 백업 저장소 (Google Sheets 미설정 시 사용) ----
 def init_records_db():
     conn = sqlite3.connect(RECORDS_DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS records (
-            id TEXT PRIMARY KEY,
-            student_name TEXT,
-            university TEXT,
-            major TEXT,
-            interview_type TEXT,
-            difficulty TEXT,
-            student_record_text TEXT,
-            result_text TEXT,
-            chat_history TEXT,
-            updated_at TEXT
+            id TEXT PRIMARY KEY, student_name TEXT, university TEXT, major TEXT,
+            interview_type TEXT, difficulty TEXT, student_record_text TEXT,
+            result_text TEXT, chat_history TEXT, updated_at TEXT
         )
     """)
     conn.commit()
     conn.close()
 
-def save_record(record_id, student_name, university, major, interview_type, difficulty,
-                 student_record_text, result_text, chat_history):
+def _sqlite_save_record(record_id, student_name, university, major, interview_type, difficulty,
+                         student_record_text, result_text, chat_history):
     conn = sqlite3.connect(RECORDS_DB_PATH)
     conn.execute("""
         INSERT INTO records (id, student_name, university, major, interview_type, difficulty,
                               student_record_text, result_text, chat_history, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
-            student_name=excluded.student_name,
-            university=excluded.university,
-            major=excluded.major,
-            interview_type=excluded.interview_type,
-            difficulty=excluded.difficulty,
-            student_record_text=excluded.student_record_text,
-            result_text=excluded.result_text,
-            chat_history=excluded.chat_history,
-            updated_at=excluded.updated_at
+            student_name=excluded.student_name, university=excluded.university, major=excluded.major,
+            interview_type=excluded.interview_type, difficulty=excluded.difficulty,
+            student_record_text=excluded.student_record_text, result_text=excluded.result_text,
+            chat_history=excluded.chat_history, updated_at=excluded.updated_at
     """, (
         record_id, student_name, university, major, interview_type, difficulty,
         student_record_text, result_text, json.dumps(chat_history, ensure_ascii=False),
@@ -297,7 +317,7 @@ def save_record(record_id, student_name, university, major, interview_type, diff
     conn.commit()
     conn.close()
 
-def list_records():
+def _sqlite_list_records():
     conn = sqlite3.connect(RECORDS_DB_PATH)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
@@ -306,29 +326,212 @@ def list_records():
     conn.close()
     return rows
 
-def get_record(record_id):
+def _sqlite_get_record(record_id):
     conn = sqlite3.connect(RECORDS_DB_PATH)
     conn.row_factory = sqlite3.Row
     row = conn.execute("SELECT * FROM records WHERE id = ?", (record_id,)).fetchone()
     conn.close()
     return row
 
-def delete_record(record_id):
+def _sqlite_delete_record(record_id):
     conn = sqlite3.connect(RECORDS_DB_PATH)
     conn.execute("DELETE FROM records WHERE id = ?", (record_id,))
     conn.commit()
     conn.close()
 
-init_records_db()
+# ---- Google Sheets 저장소 ----
+def _sheets_all_values():
+    ws = _get_records_worksheet()
+    return ws, ws.get_all_values()
+
+def _sheets_save_record(record_id, student_name, university, major, interview_type, difficulty,
+                         student_record_text, result_text, chat_history):
+    ws, all_values = _sheets_all_values()
+    row_data = [
+        record_id, student_name, university, major, interview_type, difficulty,
+        student_record_text, result_text, json.dumps(chat_history, ensure_ascii=False),
+        datetime.datetime.now().isoformat(timespec="seconds")
+    ]
+    row_idx = None
+    for i, row in enumerate(all_values[1:], start=2):
+        if row and row[0] == record_id:
+            row_idx = i
+            break
+    if row_idx:
+        ws.update(f"A{row_idx}:J{row_idx}", [row_data])
+    else:
+        ws.append_row(row_data)
+
+def _sheets_list_records():
+    _, all_values = _sheets_all_values()
+    records = [dict(zip(RECORD_COLUMNS, row)) for row in all_values[1:] if row]
+    records.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
+    return records
+
+def _sheets_get_record(record_id):
+    _, all_values = _sheets_all_values()
+    for row in all_values[1:]:
+        if row and row[0] == record_id:
+            return dict(zip(RECORD_COLUMNS, row))
+    return None
+
+def _sheets_delete_record(record_id):
+    ws, all_values = _sheets_all_values()
+    for i, row in enumerate(all_values[1:], start=2):
+        if row and row[0] == record_id:
+            ws.delete_rows(i)
+            return
+
+# ---- Google Apps Script 웹앱 저장소 (GCP 콘솔/서비스 계정 없이 구글 시트만으로 연동) ----
+def _appsscript_enabled():
+    try:
+        return "APPS_SCRIPT_URL" in st.secrets and "APPS_SCRIPT_TOKEN" in st.secrets
+    except Exception:
+        return False
+
+def _appsscript_save_record(record_id, student_name, university, major, interview_type, difficulty,
+                             student_record_text, result_text, chat_history):
+    payload = {
+        "token": st.secrets["APPS_SCRIPT_TOKEN"], "action": "save",
+        "id": record_id, "student_name": student_name, "university": university, "major": major,
+        "interview_type": interview_type, "difficulty": difficulty,
+        "student_record_text": student_record_text, "result_text": result_text,
+        "chat_history": json.dumps(chat_history, ensure_ascii=False),
+        "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+    resp = requests.post(st.secrets["APPS_SCRIPT_URL"], json=payload, timeout=30)
+    resp.raise_for_status()
+
+def _appsscript_list_records():
+    resp = requests.get(st.secrets["APPS_SCRIPT_URL"], params={"token": st.secrets["APPS_SCRIPT_TOKEN"]}, timeout=30)
+    resp.raise_for_status()
+    records = resp.json()
+    if isinstance(records, dict) and records.get("error"):
+        raise RuntimeError(records["error"])
+    records.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
+    return records
+
+def _appsscript_get_record(record_id):
+    resp = requests.get(
+        st.secrets["APPS_SCRIPT_URL"],
+        params={"token": st.secrets["APPS_SCRIPT_TOKEN"], "id": record_id}, timeout=30
+    )
+    resp.raise_for_status()
+    records = resp.json()
+    if isinstance(records, dict) and records.get("error"):
+        raise RuntimeError(records["error"])
+    return records[0] if records else None
+
+def _appsscript_delete_record(record_id):
+    payload = {"token": st.secrets["APPS_SCRIPT_TOKEN"], "action": "delete", "id": record_id}
+    resp = requests.post(st.secrets["APPS_SCRIPT_URL"], json=payload, timeout=30)
+    resp.raise_for_status()
+
+# ---- 공용 인터페이스: Secrets 설정 여부에 따라 자동으로 저장소를 선택 ----
+#   우선순위: Apps Script(가장 간단, GCP 콘솔 불필요) > Google Sheets 서비스 계정 > 로컬 SQLite
+def save_record(*args, **kwargs):
+    if _appsscript_enabled():
+        try:
+            return _appsscript_save_record(*args, **kwargs)
+        except Exception as e:
+            st.warning(f"⚠️ Apps Script 저장에 실패해 로컬에만 임시 저장합니다: {e}")
+            return _sqlite_save_record(*args, **kwargs)
+    if _sheets_enabled():
+        try:
+            return _sheets_save_record(*args, **kwargs)
+        except Exception as e:
+            st.warning(f"⚠️ Google Sheets 저장에 실패해 로컬에만 임시 저장합니다: {e}")
+    return _sqlite_save_record(*args, **kwargs)
+
+def list_records():
+    if _appsscript_enabled():
+        try:
+            return _appsscript_list_records()
+        except Exception as e:
+            st.warning(f"⚠️ Apps Script 조회에 실패했습니다: {e}")
+            return []
+    if _sheets_enabled():
+        try:
+            return _sheets_list_records()
+        except Exception as e:
+            st.warning(f"⚠️ Google Sheets 조회에 실패했습니다: {e}")
+            return []
+    return _sqlite_list_records()
+
+def get_record(record_id):
+    if _appsscript_enabled():
+        try:
+            return _appsscript_get_record(record_id)
+        except Exception as e:
+            st.warning(f"⚠️ Apps Script 조회에 실패했습니다: {e}")
+            return None
+    if _sheets_enabled():
+        try:
+            return _sheets_get_record(record_id)
+        except Exception as e:
+            st.warning(f"⚠️ Google Sheets 조회에 실패했습니다: {e}")
+            return None
+    return _sqlite_get_record(record_id)
+
+def delete_record(record_id):
+    if _appsscript_enabled():
+        try:
+            return _appsscript_delete_record(record_id)
+        except Exception as e:
+            st.warning(f"⚠️ Apps Script 삭제에 실패했습니다: {e}")
+            return
+    if _sheets_enabled():
+        try:
+            return _sheets_delete_record(record_id)
+        except Exception as e:
+            st.warning(f"⚠️ Google Sheets 삭제에 실패했습니다: {e}")
+            return
+    return _sqlite_delete_record(record_id)
+
+if not (_appsscript_enabled() or _sheets_enabled()):
+    init_records_db()
 
 # -------------------------------------------------------------------------
 # [1] 스마트 PDF 및 제미나이 통신 함수 (텍스트 및 오디오)
 # -------------------------------------------------------------------------
 def extract_text_from_pdf(uploaded_file):
+    """
+    PDF에서 텍스트를 추출합니다.
+    - 텍스트 레이어가 있는 일반 PDF(나이스 출력본, 한글/워드로 저장한 PDF 등)는 바로 추출됩니다.
+    - 스캔본(이미지로만 된) PDF라서 추출된 글자가 거의 없으면, 서버에 Tesseract OCR이 설치되어
+      있는 경우 자동으로 페이지를 이미지로 렌더링해 OCR을 시도합니다. 그래서 선생님이 미리
+      수동으로 OCR 변환을 해두지 않아도 됩니다.
+    """
     doc = pymupdf.open(stream=uploaded_file.read(), filetype="pdf")
     full_text = ""
     for page in doc:
         full_text += page.get_text()
+
+    # 페이지당 평균 글자 수가 너무 적으면 스캔본(이미지) PDF로 판단하고 자동 OCR 시도
+    avg_chars_per_page = len(full_text.strip()) / max(len(doc), 1)
+    if avg_chars_per_page < 30:
+        try:
+            import pytesseract
+            from PIL import Image
+
+            ocr_text = ""
+            for page in doc:
+                pix = page.get_pixmap(dpi=300)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                ocr_text += pytesseract.image_to_string(img, lang="kor+eng")
+
+            if len(ocr_text.strip()) > len(full_text.strip()):
+                st.info("📸 스캔본(이미지) PDF로 보여 자동으로 OCR 텍스트 인식을 실행했습니다.")
+                full_text = ocr_text
+        except Exception:
+            # Tesseract가 서버에 설치되어 있지 않거나 OCR이 실패한 경우:
+            # 원래 추출된 텍스트(비어 있을 수 있음)라도 그대로 사용합니다.
+            if not full_text.strip():
+                st.warning(
+                    "⚠️ 이 PDF는 텍스트 레이어가 없는 스캔본으로 보이는데, 서버에 OCR 엔진이 "
+                    "설치되어 있지 않아 자동 인식에 실패했습니다. packages.txt에 tesseract-ocr을 "
+                    "추가했는지 확인해 주세요."
+                )
     return full_text
 
 def call_gemini(prompt, api_key):
@@ -680,6 +883,13 @@ with st.sidebar:
     else:
         st.success(f"📊 실제 기출 DB 연동됨\n{len(exam_db):,}건 / {exam_db['대학'].nunique()}개 대학")
 
+    if _appsscript_enabled():
+        st.success("☁️ 학생 기록: Google Sheets(Apps Script)에 반영구 저장 중")
+    elif _sheets_enabled():
+        st.success("☁️ 학생 기록: Google Sheets(서비스 계정)에 반영구 저장 중")
+    else:
+        st.info("💾 학생 기록: 로컬 임시 저장 중 (재배포 시 초기화될 수 있음)")
+
 UNIVERSITIES = {
     "서울권": ["서울대", "연세대", "고려대", "성균관대", "서강대", "한양대", "중앙대", "경희대", "한국외대", "서울시립대", "이화여대"],
     "충청권": ["카이스트(KAIST)", "충남대", "충북대", "고려대(세종)"],
@@ -822,7 +1032,11 @@ if st.button("🚀 면접 패키지 생성 시작"):
         st.error("생기부 파일을 업로드하거나, 위에서 저장된 기록을 먼저 불러와 주세요.")
         st.stop()
 
-    student_record = extract_text_from_pdf(uploaded_file) if uploaded_file else st.session_state.get("loaded_student_record_text", "")
+    if uploaded_file:
+        with st.spinner("📄 PDF에서 텍스트를 확인하는 중입니다... (스캔본이면 자동으로 OCR을 시도합니다)"):
+            student_record = extract_text_from_pdf(uploaded_file)
+    else:
+        student_record = st.session_state.get("loaded_student_record_text", "")
     st.session_state.loaded_student_record_text = student_record
 
     # 🔎 실제 기출 DB에서 지원 학과와 유사한 사례를 찾아 프롬프트에 결합
