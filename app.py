@@ -805,13 +805,22 @@ exam_db = load_exam_db(MASTER_DB_PATH)
 # -------------------------------------------------------------------------
 # 📂 저장된 학생 기록 불러오기 (PDF 재업로드 없이 이전 작업 이어서 하기)
 # -------------------------------------------------------------------------
+def _rec_get(row, key, default=""):
+    """sqlite3.Row와 Apps Script/Sheets에서 온 dict를 모두 안전하게 다루기 위한 헬퍼.
+    (Apps Script 백엔드는 생기부 원문·면접유형·난이도를 저장하지 않으므로 해당 키가 없을 수 있음)"""
+    try:
+        val = row[key]
+        return val if val not in (None, "") else default
+    except (KeyError, IndexError):
+        return default
+
 with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=False):
     saved_records = list_records()
     if not saved_records:
-        st.caption("아직 저장된 기록이 없습니다. 문항을 한 번 생성하면 이 학생의 생기부·문항·대화가 자동으로 저장됩니다.")
+        st.caption("아직 저장된 기록이 없습니다. 문항을 한 번 생성하면 이 학생의 문항·대화가 자동으로 저장됩니다.")
     else:
         record_options = {
-            f"{r['student_name']} · {r['university']}_{r['major']} ({r['interview_type']}) — "
+            f"{r['student_name']} · {r['university']}_{r['major']} — "
             f"{r['updated_at'][:16].replace('T', ' ')}": r["id"]
             for r in saved_records
         }
@@ -825,19 +834,21 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                     st.session_state["uni_direct_input"] = row["university"]
                     st.session_state["major_input"] = row["major"]
                     st.session_state["student_name_input"] = row["student_name"]
-                    st.session_state["interview_type_radio"] = row["interview_type"]
-                    st.session_state["difficulty_radio"] = row["difficulty"] or "중 (표준)"
-                    st.session_state["loaded_student_record_text"] = row["student_record_text"] or ""
+                    st.session_state["interview_type_radio"] = _rec_get(row, "interview_type", "생기부 기반 면접")
+                    st.session_state["difficulty_radio"] = _rec_get(row, "difficulty", "중 (표준)")
+                    st.session_state["loaded_student_record_text"] = _rec_get(row, "student_record_text", "")
                     st.session_state["last_result_text"] = row["result_text"] or ""
                     st.session_state["chat_history"] = json.loads(row["chat_history"]) if row["chat_history"] else []
                     st.session_state["current_record_id"] = row["id"]
                     if row["result_text"]:
                         stu_path, tea_path = create_word_files(
-                            row["result_text"], row["student_name"], row["interview_type"],
+                            row["result_text"], row["student_name"], _rec_get(row, "interview_type", "생기부 기반 면접"),
                             f"{row['university']}_{row['major']}"
                         )
                         st.session_state["word_files"] = (stu_path, tea_path)
-                    st.success(f"'{row['student_name']}' 학생의 기록을 불러왔습니다. PDF를 다시 업로드하지 않아도 이어서 진행할 수 있습니다.")
+                    if not _rec_get(row, "student_record_text", ""):
+                        st.info("ℹ️ 이 저장 방식은 생기부 원문은 따로 저장하지 않습니다. 문항/대화 내용은 그대로 불러왔고, 생기부 재분석이 필요하면 PDF를 다시 업로드해주세요.")
+                    st.success(f"'{row['student_name']}' 학생의 기록을 불러왔습니다.")
                     st.rerun()
         with col_delete:
             if st.button("🗑️ 이 기록 삭제", use_container_width=True):
