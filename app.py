@@ -403,6 +403,17 @@ def _appsscript_save_record(record_id, student_name, university, major, intervie
     }
     resp = requests.post(st.secrets["APPS_SCRIPT_URL"], json=payload, timeout=30)
     resp.raise_for_status()
+    # ⚠️ Apps Script는 인증 실패 같은 오류도 HTTP 200으로 돌려주기 때문에,
+    #    응답 본문까지 확인해야 "저장된 줄 알았는데 실제로는 저장 안 된" 상황을 막을 수 있습니다.
+    try:
+        body = resp.json()
+    except Exception:
+        raise RuntimeError("Apps Script가 예상과 다른 응답을 보냈습니다. 웹 앱 URL과 재배포 상태를 확인해 주세요.")
+    if isinstance(body, dict) and body.get("error"):
+        raise RuntimeError(body["error"])
+    if not (isinstance(body, dict) and body.get("status") == "ok"):
+        raise RuntimeError(f"Apps Script 저장 응답이 올바르지 않습니다: {str(body)[:200]}")
+    return body
 
 def _appsscript_list_records():
     resp = requests.get(st.secrets["APPS_SCRIPT_URL"], params={"token": st.secrets["APPS_SCRIPT_TOKEN"]}, timeout=30)
@@ -428,22 +439,54 @@ def _appsscript_delete_record(record_id):
     payload = {"token": st.secrets["APPS_SCRIPT_TOKEN"], "action": "delete", "id": record_id}
     resp = requests.post(st.secrets["APPS_SCRIPT_URL"], json=payload, timeout=30)
     resp.raise_for_status()
+    try:
+        body = resp.json()
+    except Exception:
+        return
+    if isinstance(body, dict) and body.get("error"):
+        raise RuntimeError(body["error"])
 
 # ---- 공용 인터페이스: Secrets 설정 여부에 따라 자동으로 저장소를 선택 ----
 #   우선순위: Apps Script(가장 간단, GCP 콘솔 불필요) > Google Sheets 서비스 계정 > 로컬 SQLite
-def save_record(*args, **kwargs):
+def save_record(*args, quiet=False, **kwargs):
+    """기록을 저장하고 '어디에 저장되었는지'를 딕셔너리로 돌려줍니다.
+    반환값: {"ok": bool, "where": "구글시트(Apps Script)"/"구글시트(서비스 계정)"/"로컬 임시저장",
+             "at": "HH:MM:SS", "error": "(실패 시 사유)"}
+    """
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     if _appsscript_enabled():
         try:
-            return _appsscript_save_record(*args, **kwargs)
+            _appsscript_save_record(*args, **kwargs)
+            info = {"ok": True, "where": "구글시트(Apps Script)", "at": now_str, "error": ""}
+            st.session_state["last_save_info"] = info
+            return info
         except Exception as e:
-            st.warning(f"⚠️ Apps Script 저장에 실패해 로컬에만 임시 저장합니다: {e}")
-            return _sqlite_save_record(*args, **kwargs)
+            if not quiet:
+                st.warning(f"⚠️ 구글시트 저장에 실패해 로컬에만 임시 저장합니다: {e}")
+            _sqlite_save_record(*args, **kwargs)
+            info = {"ok": False, "where": "로컬 임시저장", "at": now_str, "error": str(e)}
+            st.session_state["last_save_info"] = info
+            return info
+
     if _sheets_enabled():
         try:
-            return _sheets_save_record(*args, **kwargs)
+            _sheets_save_record(*args, **kwargs)
+            info = {"ok": True, "where": "구글시트(서비스 계정)", "at": now_str, "error": ""}
+            st.session_state["last_save_info"] = info
+            return info
         except Exception as e:
-            st.warning(f"⚠️ Google Sheets 저장에 실패해 로컬에만 임시 저장합니다: {e}")
-    return _sqlite_save_record(*args, **kwargs)
+            if not quiet:
+                st.warning(f"⚠️ 구글시트 저장에 실패해 로컬에만 임시 저장합니다: {e}")
+            _sqlite_save_record(*args, **kwargs)
+            info = {"ok": False, "where": "로컬 임시저장", "at": now_str, "error": str(e)}
+            st.session_state["last_save_info"] = info
+            return info
+
+    _sqlite_save_record(*args, **kwargs)
+    info = {"ok": True, "where": "로컬 임시저장", "at": now_str, "error": ""}
+    st.session_state["last_save_info"] = info
+    return info
 
 def list_records():
     if _appsscript_enabled():
@@ -489,6 +532,32 @@ def delete_record(record_id):
             st.warning(f"⚠️ Google Sheets 삭제에 실패했습니다: {e}")
             return
     return _sqlite_delete_record(record_id)
+
+def save_current_session(student_name, university, major, interview_type, difficulty, quiet=False):
+    """지금 화면에 올라와 있는 내용(생기부 텍스트·문항·대화 내역)을 그대로 저장합니다.
+    자동 저장과 수동 저장('💾 지금 저장하기') 모두 이 함수를 사용합니다."""
+    if not st.session_state.get("current_record_id"):
+        st.session_state.current_record_id = str(uuid.uuid4())
+    return save_record(
+        st.session_state.current_record_id, student_name, university, major, interview_type, difficulty,
+        st.session_state.get("loaded_student_record_text", ""),
+        st.session_state.get("last_result_text", ""),
+        st.session_state.get("chat_history", []),
+        quiet=quiet,
+    )
+
+def render_save_status(prefix=""):
+    """마지막 저장 시각과 저장 위치를 한 줄로 보여줍니다."""
+    last = st.session_state.get("last_save_info")
+    if not last:
+        st.caption(f"{prefix}아직 이번 세션에서 저장된 기록이 없습니다.")
+        return
+    if last["ok"] and "구글시트" in last["where"]:
+        st.caption(f"{prefix}☁️ 마지막 저장: {last['at']} · {last['where']}")
+    elif last["ok"]:
+        st.caption(f"{prefix}💾 마지막 저장: {last['at']} · {last['where']} (재배포 시 사라질 수 있음)")
+    else:
+        st.caption(f"{prefix}⚠️ 마지막 저장 실패: {last['at']} · 로컬에만 임시 저장됨")
 
 if not (_appsscript_enabled() or _sheets_enabled()):
     init_records_db()
@@ -1188,6 +1257,7 @@ if "easy_explanation_file" not in st.session_state: st.session_state.easy_explan
 if "summary_card_file" not in st.session_state: st.session_state.summary_card_file = None
 if "growth_report_file" not in st.session_state: st.session_state.growth_report_file = None
 if "evaluation_sheet_file" not in st.session_state: st.session_state.evaluation_sheet_file = None
+if "last_save_info" not in st.session_state: st.session_state.last_save_info = None
 
 exam_db = load_exam_db(MASTER_DB_PATH)
 
@@ -1211,6 +1281,33 @@ with st.sidebar:
         st.success("☁️ 학생 기록: Google Sheets(서비스 계정)에 반영구 저장 중")
     else:
         st.info("💾 학생 기록: 로컬 임시 저장 중 (재배포 시 초기화될 수 있음)")
+
+    render_save_status()
+
+    # 구글시트 연결이 실제로 살아있는지 직접 확인 (토큰이 어긋나면 저장이 조용히 실패할 수 있음)
+    if _appsscript_enabled():
+        if st.button("🔌 구글시트 연결 테스트", use_container_width=True, key="conn_test_btn"):
+            try:
+                test_payload = {
+                    "token": st.secrets["APPS_SCRIPT_TOKEN"], "action": "save",
+                    "id": "__connection_test__", "student_name": "(연결테스트)",
+                    "university": "-", "major": "-", "result_text": "", "chat_history": "[]",
+                    "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                }
+                r = requests.post(st.secrets["APPS_SCRIPT_URL"], json=test_payload, timeout=30)
+                r.raise_for_status()
+                body = r.json()
+                if isinstance(body, dict) and body.get("status") == "ok":
+                    requests.post(
+                        st.secrets["APPS_SCRIPT_URL"],
+                        json={"token": st.secrets["APPS_SCRIPT_TOKEN"], "action": "delete", "id": "__connection_test__"},
+                        timeout=30,
+                    )
+                    st.success("✅ 구글시트 저장이 정상 동작합니다.")
+                else:
+                    st.error(f"❌ 저장 실패 응답: {body}\n\n토큰이 서로 다르거나 Apps Script를 새 버전으로 재배포하지 않았을 수 있습니다.")
+            except Exception as e:
+                st.error(f"❌ 연결 실패: {e}")
 
 # -------------------------------------------------------------------------
 # 📂 저장된 학생 기록 불러오기 (PDF 재업로드 없이 이전 작업 이어서 하기)
@@ -1757,12 +1854,24 @@ if st.button("🚀 면접 패키지 생성 시작"):
             # 📌 이 학생의 생기부·문항·대화를 저장해서, 다음에 다시 열어도 이어서 볼 수 있게 함
             if not st.session_state.get("current_record_id"):
                 st.session_state.current_record_id = str(uuid.uuid4())
-            save_record(
+            st.session_state.loaded_student_record_text = student_record
+            save_info = save_record(
                 st.session_state.current_record_id, student_name, uni, major, interview_type, difficulty,
                 student_record, result_text, st.session_state.chat_history
             )
 
-            st.success("🎉 면접 패키지 및 워드 문서 생성이 완료되었습니다! (이 학생 기록은 자동 저장되었습니다)")
+            if save_info.get("ok") and "구글시트" in save_info.get("where", ""):
+                st.success(
+                    f"🎉 면접 패키지 생성 완료! ☁️ 학생 기록도 {save_info['where']}에 자동 저장되었습니다. ({save_info['at']})"
+                )
+            elif save_info.get("ok"):
+                st.success("🎉 면접 패키지 생성 완료! 💾 학생 기록은 로컬에 임시 저장되었습니다.")
+            else:
+                st.warning(
+                    "🎉 면접 패키지는 생성되었지만 ⚠️ **구글시트 자동 저장에 실패**해 로컬에만 임시 저장했습니다.\n\n"
+                    f"사유: {save_info.get('error', '')}\n\n"
+                    "아래 결과 화면의 **'💾 지금 저장하기'** 버튼으로 다시 시도해 보세요."
+                )
 
         except Exception as e:
             st.error(f"❌ 생성 실패: {e}")
@@ -1804,6 +1913,27 @@ if st.session_state.chat_history:
             with download_cols[i % len(download_cols)]:
                 with open(path, "rb") as f:
                     st.download_button(label, f, file_name=path, use_container_width=True, key=f"dl_{i}_{path}")
+
+    # -------------------------------------------------------------------
+    # 💾 저장 (자동 저장 + 수동 저장 버튼)
+    #    문항 생성·음성 평가·답변 첨삭·피드백 때마다 자동 저장되지만,
+    #    자동 저장이 실패했거나 확실히 남겨두고 싶을 때 이 버튼으로 직접 저장할 수 있습니다.
+    # -------------------------------------------------------------------
+    save_col1, save_col2 = st.columns([1, 2])
+    with save_col1:
+        if st.button("💾 지금 저장하기", use_container_width=True, key="manual_save_btn"):
+            manual_info = save_current_session(student_name, uni, major, interview_type, difficulty, quiet=True)
+            if manual_info["ok"] and "구글시트" in manual_info["where"]:
+                st.success(f"✅ {manual_info['where']}에 저장했습니다. ({manual_info['at']})")
+            elif manual_info["ok"]:
+                st.info(f"💾 로컬에 임시 저장했습니다. ({manual_info['at']}) — 구글시트 연동이 설정되지 않은 상태입니다.")
+            else:
+                st.error(
+                    f"❌ 구글시트 저장 실패: {manual_info['error']}\n\n"
+                    "로컬에만 임시 저장했습니다. 사이드바의 저장 상태와 Apps Script 토큰·재배포 상태를 확인해 주세요."
+                )
+    with save_col2:
+        render_save_status()
 
     if st.session_state.get("easy_explanation_text"):
         with st.expander("📚 생기부 쉬운 해설 미리보기 (고등학교 1학년 눈높이)", expanded=False):
