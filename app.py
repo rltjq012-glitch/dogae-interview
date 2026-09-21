@@ -172,6 +172,9 @@ st.markdown("""
 #     master_interview_qa.csv 파일을 app.py와 같은 폴더에 두면 자동으로 로드됩니다.
 # -------------------------------------------------------------------------
 MASTER_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "master_interview_qa.csv")
+UNIV_INFO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "univ_interview_info.csv")
+
+INFO_COLUMNS = ["대학", "학과", "전형", "면접유형", "면접시간", "면접위원", "면접절차", "유의사항", "선배조언"]
 
 @st.cache_data(show_spinner=False)
 def load_exam_db(path):
@@ -184,6 +187,17 @@ def load_exam_db(path):
     except Exception:
         return pd.DataFrame(columns=["대학", "학과", "전형", "질문", "답변", "원본파일"])
 
+@st.cache_data(show_spinner=False)
+def load_univ_info(path):
+    """2026학년도 면접 후기에서 정리한 대학별 면접 형식 정보
+    (면접 시간 · 면접위원 수 · 면접 절차 · 유의사항 · 선배 조언)"""
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=INFO_COLUMNS)
+    try:
+        return pd.read_csv(path, encoding="utf-8-sig")
+    except Exception:
+        return pd.DataFrame(columns=INFO_COLUMNS)
+
 def _normalize_dept(name):
     """'간호학과' -> '간호' 처럼 학과명에서 흔한 접미사를 제거해 비교하기 쉽게 만듭니다."""
     if not isinstance(name, str):
@@ -195,43 +209,125 @@ def _normalize_dept(name):
     return s
 
 def _normalize_uni(name):
+    """대학명을 비교하기 쉬운 형태로 통일합니다.
+    앱 화면의 '서울대'와 DB의 '서울대학교(서울)'이 같은 학교로 인식되도록
+    '대학교/대학/대' 꼬리말을 모두 떼어냅니다. (예: 서울대 → 서울, 서울대학교(서울) → 서울)"""
     if not isinstance(name, str):
         return ""
     base = name.split("(")[0].strip()
-    for suf in ["대학교", "대학"]:
-        if base.endswith(suf) and len(base) > len(suf):
+    for suf in ["대학교", "대학", "대"]:
+        if base.endswith(suf) and len(base) - len(suf) >= 2:
             base = base[: -len(suf)]
+            break
     return base
 
+def _uni_matches(query_uni, db_uni):
+    """두 대학명이 같은 학교인지 판정합니다.
+    단순 부분일치를 쓰면 '서울대'가 '서울과학기술대'에도 걸리므로,
+    정규화 후 완전히 같거나 / 앞부분이 같으면서 길이 차이가 2글자 이하일 때만 같은 학교로 봅니다.
+    (예: 한국외 ↔ 한국외국어 ✅ , 이화여 ↔ 이화여자 ✅ , 서울 ↔ 서울과학기술 ❌)"""
+    a, b = _normalize_uni(query_uni), _normalize_uni(db_uni)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    return long_.startswith(short) and len(short) >= 3 and (len(long_) - len(short)) <= 2
+
 def get_relevant_examples(df, major, uni_name, top_n=12):
-    """선택한 전공/대학과 가장 유사한 실제 기출 질의응답을 DB에서 골라옵니다."""
+    """선택한 전공/대학과 가장 유사한 실제 기출 질의응답을 DB에서 골라옵니다.
+
+    우선순위 (학과 적합성이 대학보다 우선 — 다른 대학의 같은 학과가
+    같은 대학의 엉뚱한 학과보다 면접 준비에 훨씬 유용하기 때문):
+      0순위: 지원 대학 + 학과 정확 일치
+      1순위: 다른 대학 + 학과 정확 일치
+      2순위: 지원 대학 + 학과 부분 일치 (예: 분자생물학과 ↔ 생물학과)
+      3순위: 다른 대학 + 학과 부분 일치
+      4순위: 지원 대학 + 학과 유사 (철자 기준)
+      5순위: 다른 대학 + 학과 유사
+    """
     if df.empty or not major:
         return df.head(0)
 
     df = df.copy()
     major_norm = _normalize_dept(major)
-    df["_dept_norm"] = df["학과"].apply(_normalize_dept)
+    uni_key = _normalize_uni(uni_name)
 
-    exact = df[df["학과"] == major.strip()]
-    partial = df[df["_dept_norm"].apply(lambda d: bool(d) and (d in major_norm or major_norm in d))]
+    df["_dept_norm"] = df["학과"].apply(_normalize_dept)
+    same_uni = df["대학"].apply(lambda u: bool(uni_key) and _uni_matches(uni_name, u))
+
+    is_exact = df["학과"].astype(str).str.strip() == str(major).strip()
+    is_partial = df["_dept_norm"].apply(lambda d: bool(d) and (d in major_norm or major_norm in d))
 
     dept_pool = df["_dept_norm"].dropna().unique().tolist()
-    close = difflib.get_close_matches(major_norm, dept_pool, n=6, cutoff=0.5)
-    fuzzy = df[df["_dept_norm"].isin(close)]
+    # cutoff를 0.5 → 0.75로 올림: '분자생물'과 '고분자공'처럼 글자만 겹치는 엉뚱한 학과 매칭 방지
+    close = difflib.get_close_matches(major_norm, dept_pool, n=6, cutoff=0.75)
+    is_fuzzy = df["_dept_norm"].isin(close)
 
-    combined = pd.concat([exact, partial, fuzzy]).drop_duplicates(subset=["대학", "학과", "질문"])
+    NO_MATCH = 99
+    score = pd.Series(NO_MATCH, index=df.index)
+    score[is_fuzzy] = 5
+    score[is_fuzzy & same_uni] = 4
+    score[is_partial] = 3
+    score[is_partial & same_uni] = 2
+    score[is_exact] = 1
+    score[is_exact & same_uni] = 0
+    df["_score"] = score
 
-    if combined.empty:
-        # 전공 일치 항목이 전혀 없을 때는 실전 감각을 위해 DB 전체에서 무작위 샘플을 보여줍니다.
-        combined = df.sample(min(top_n, len(df)), random_state=42)
-    else:
-        uni_key = _normalize_uni(uni_name)
-        if uni_key:
-            same_uni = combined[combined["대학"].apply(lambda u: uni_key in _normalize_uni(u))]
-            rest = combined.drop(same_uni.index)
-            combined = pd.concat([same_uni, rest])
+    hits = df[df["_score"] < NO_MATCH].sort_values("_score", kind="stable")
+    hits = hits.drop_duplicates(subset=["대학", "학과", "질문"])
 
-    return combined.head(top_n)
+    if not hits.empty:
+        return hits.head(top_n)
+
+    # 유사 학과가 하나도 없을 때: 아무 학과나 무작위로 섞기보다
+    # 최소한 '지원 대학의 다른 학과 기출'을 써서 그 대학 면접 화법이라도 반영합니다.
+    same_uni_any = df[same_uni]
+    if not same_uni_any.empty:
+        return same_uni_any.sample(min(top_n, len(same_uni_any)), random_state=42)
+    return df.sample(min(top_n, len(df)), random_state=42)
+
+def get_univ_info(info_df, uni_name, major):
+    """지원 대학의 실제 면접 형식 정보를 찾습니다. 같은 학과가 있으면 그것을 우선합니다."""
+    if info_df is None or info_df.empty or not uni_name:
+        return None
+    uni_key = _normalize_uni(uni_name)
+    if not uni_key:
+        return None
+    same_uni = info_df[info_df["대학"].apply(lambda u: _uni_matches(uni_name, str(u)))]
+    if same_uni.empty:
+        return None
+    major_norm = _normalize_dept(major or "")
+    if major_norm:
+        same_dept = same_uni[same_uni["학과"].apply(
+            lambda d: bool(_normalize_dept(str(d))) and
+            (_normalize_dept(str(d)) in major_norm or major_norm in _normalize_dept(str(d)))
+        )]
+        if not same_dept.empty:
+            return same_dept.iloc[0]
+    return same_uni.iloc[0]
+
+def format_univ_info_for_prompt(info_row):
+    """면접 형식 정보를 프롬프트에 넣을 문장으로 만듭니다."""
+    if info_row is None:
+        return ""
+    def _v(key):
+        val = info_row.get(key, "")
+        return "" if (val is None or str(val).strip().lower() in ("", "nan")) else str(val).strip()
+
+    parts = [f"\n[지원 대학의 실제 면접 형식 (2026학년도 면접 후기 기준: {_v('대학')} {_v('학과')} / {_v('전형')})]"]
+    if _v("면접유형"):
+        parts.append(f"- 면접 유형: {_v('면접유형')}")
+    if _v("면접시간"):
+        parts.append(f"- 면접 시간: {_v('면접시간')} (이 시간 안에 소화 가능한 분량으로 문항을 설계하세요)")
+    if _v("면접위원"):
+        parts.append(f"- 면접 위원: {_v('면접위원')}")
+    if _v("유의사항"):
+        parts.append(f"- 실제 면접 특징: {_v('유의사항')[:300]}")
+    if _v("선배조언"):
+        parts.append(f"- 합격 선배의 조언(출제 경향 참고): {_v('선배조언')[:300]}")
+    parts.append("※ 위 형식을 반드시 반영해 문항 수와 깊이를 정하세요. 예를 들어 10분 면접이면 지나치게 많은 세부 질문을 넣지 마세요.")
+    return "\n".join(parts)
 
 def format_examples_for_prompt(examples_df):
     if examples_df.empty:
@@ -1262,6 +1358,7 @@ if "evaluation_sheet_file" not in st.session_state: st.session_state.evaluation_
 if "last_save_info" not in st.session_state: st.session_state.last_save_info = None
 
 exam_db = load_exam_db(MASTER_DB_PATH)
+univ_info_db = load_univ_info(UNIV_INFO_PATH)
 
 with st.sidebar:
     # Streamlit Cloud의 Secrets(GEMINI_API_KEY)에 키가 등록되어 있으면 자동으로 사용하고,
@@ -1276,6 +1373,11 @@ with st.sidebar:
         st.warning("⚠️ 실제 기출 DB(master_interview_qa.csv)가 없습니다.\n앱과 같은 폴더에 파일을 넣어주세요.")
     else:
         st.success(f"📊 실제 기출 DB 연동됨\n{len(exam_db):,}건 / {exam_db['대학'].nunique()}개 대학")
+
+    if univ_info_db.empty:
+        st.info("📋 대학별 면접 형식 정보(univ_interview_info.csv)가 없습니다.")
+    else:
+        st.success(f"📋 2026 면접 형식 정보\n{univ_info_db['대학'].nunique()}개 대학 / {len(univ_info_db)}개 학과")
 
     if _appsscript_enabled():
         st.success("☁️ 학생 기록: Google Sheets(Apps Script)에 반영구 저장 중")
@@ -1479,6 +1581,28 @@ if interview_type == "생기부 기반 면접":
     )
     if st.session_state.get("loaded_student_record_text") and not uploaded_file:
         st.info("📌 불러온 학생의 생기부 텍스트를 그대로 사용합니다. 다른 PDF를 새로 올리면 그것으로 대체됩니다.")
+
+# 📋 선택한 대학의 실제 면접 형식 (2026학년도 합격생 후기 기준)
+_info_row = get_univ_info(univ_info_db, uni, major)
+if _info_row is not None:
+    def _iv(key):
+        v = _info_row.get(key, "")
+        return "" if (v is None or str(v).strip().lower() in ("", "nan")) else str(v).strip()
+
+    _head = " · ".join(x for x in [
+        f"⏱️ {_iv('면접시간')}" if _iv('면접시간') else "",
+        f"👥 면접위원 {_iv('면접위원')}" if _iv('면접위원') else "",
+        f"📄 {_iv('면접유형')}" if _iv('면접유형') else "",
+    ] if x)
+    with st.expander(f"📋 {_iv('대학')} 실제 면접 형식 보기 (2026학년도 후기 · {_iv('학과')}) — {_head}", expanded=False):
+        st.markdown(f"**전형:** {_iv('전형') or '-'}")
+        if _iv("면접절차"):
+            st.markdown(f"**면접 절차:** {_iv('면접절차')}")
+        if _iv("유의사항"):
+            st.markdown(f"**유의사항:** {_iv('유의사항')}")
+        if _iv("선배조언"):
+            st.markdown(f"**합격 선배의 조언:** {_iv('선배조언')}")
+        st.caption("※ 2026학년도 면접 후기 자료에서 정리한 내용이며, 이 정보는 문항 생성 시 AI에게도 함께 전달되어 면접 시간에 맞는 분량으로 설계됩니다.")
 
 st.markdown("---")
 
@@ -1763,7 +1887,17 @@ if st.button("🚀 면접 패키지 생성 시작"):
     # 🔎 실제 기출 DB에서 지원 학과와 유사한 사례를 찾아 프롬프트에 결합
     relevant_examples = get_relevant_examples(exam_db, major, uni, top_n=12)
     dynamic_exam_text = format_examples_for_prompt(relevant_examples)
-    combined_exam_data = PAST_EXAM_DATA + ("\n" + dynamic_exam_text if dynamic_exam_text else "")
+
+    # 📋 2026학년도 후기 기준 '그 대학의 실제 면접 형식'도 함께 반영 (시간·면접위원·유의사항)
+    univ_info_row = get_univ_info(univ_info_db, uni, major)
+    univ_info_text = format_univ_info_for_prompt(univ_info_row)
+    st.session_state.last_univ_info = univ_info_row
+
+    combined_exam_data = PAST_EXAM_DATA
+    if dynamic_exam_text:
+        combined_exam_data += "\n" + dynamic_exam_text
+    if univ_info_text:
+        combined_exam_data += "\n" + univ_info_text
     st.session_state.last_examples = relevant_examples
 
     if interview_type == "생기부 기반 면접":
@@ -1896,9 +2030,23 @@ if st.button("🚀 면접 패키지 생성 시작"):
 
 # 이번 생성에 실제로 참고된 기출 사례를 투명하게 보여줌
 if st.session_state.get("last_examples") is not None and not st.session_state.last_examples.empty:
-    with st.expander(f"🔎 이번 문항 생성에 참고한 실제 기출 사례 보기 ({len(st.session_state.last_examples)}건)", expanded=False):
-        for _, r in st.session_state.last_examples.iterrows():
-            st.markdown(f"**[{r['대학']} · {r['학과']}]** {r['질문']}")
+    _ex = st.session_state.last_examples
+    with st.expander(f"🔎 이번 문항 생성에 참고한 실제 기출 사례 보기 ({len(_ex)}건)", expanded=False):
+        # 어떤 기준으로 뽑혔는지 먼저 요약해서 보여줌 (학과 우선 → 같은 대학 우선 순)
+        _uni_key = _normalize_uni(uni)
+        _same_cnt = sum(1 for u in _ex["대학"] if _uni_matches(uni, str(u)))
+        _depts = sorted(set(str(d) for d in _ex["학과"]))
+        st.info(
+            f"**매칭 기준** — 지원 학과({major})와 같거나 가장 가까운 학과의 기출을 먼저 고르고, "
+            f"그 안에서 지원 대학({uni}) 기출을 앞쪽에 배치합니다.\n\n"
+            f"- 참고한 학과: {', '.join(_depts)}\n"
+            f"- {uni} 기출: **{_same_cnt}건** / 다른 대학 같은·유사 학과: **{len(_ex) - _same_cnt}건**"
+            + ("\n\n※ 지원 대학의 해당 학과 기출이 DB에 없어 다른 대학의 같은 학과 기출로 채웠습니다."
+               if _same_cnt == 0 else "")
+        )
+        for _, r in _ex.iterrows():
+            _mark = "⭐ " if _uni_matches(uni, str(r["대학"])) else ""
+            st.markdown(f"{_mark}**[{r['대학']} · {r['학과']}]** {r['질문']}")
             st.caption(str(r['답변'])[:200] + ("..." if len(str(r['답변'])) > 200 else ""))
 
 # -------------------------------------------------------------------------
