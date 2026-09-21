@@ -25,6 +25,7 @@ from google.genai import types
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_ROW_HEIGHT_RULE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
@@ -882,6 +883,256 @@ def create_summary_card_word(result_text, student_name, university, major, inter
     return file_path
 
 # -------------------------------------------------------------------------
+# [2-3] 교사용 면접 평가표 (인쇄해서 손으로 채점할 수 있는 양식)
+#   실제 대학 학생부종합전형 면접 평가요소(학업역량·전공적합성·인성·발전가능성)와
+#   면접 태도 평가 관행(목소리·자세·시선·태도)을 바탕으로 항목당 10점 만점으로 구성
+# -------------------------------------------------------------------------
+EVALUATION_RUBRIC = [
+    ("내용 영역\n(60점)", [
+        ("질문 이해·논리성", "질문의 의도를 정확히 파악하고, 결론과 근거가 분명한 논리적 구조로 답변하는가"),
+        ("전공 적합성", "지원 전공에 대한 이해와 관심, 관련 활동 경험이 답변 속에 구체적으로 드러나는가"),
+        ("학업 역량", "교과 지식과 탐구 경험을 바탕으로 개념을 정확하고 깊이 있게 설명할 수 있는가"),
+        ("기재 내용 신뢰도", "생기부에 기재된 활동을 본인이 실제 수행했음이 구체적 경험 진술로 확인되는가"),
+        ("인성·공동체 역량", "협업·배려·성실성·소통 능력이 막연한 다짐이 아닌 구체적 경험으로 드러나는가"),
+        ("발전 가능성", "자기주도성, 문제 해결 경험, 진로 계획의 구체성과 실현 가능성이 나타나는가"),
+    ]),
+    ("태도·표현 영역\n(40점)", [
+        ("목소리·전달력", "목소리 크기와 발음이 명확하고, 말끝을 흐리거나 불필요한 군말을 반복하지 않는가"),
+        ("자세·시선 처리", "바른 자세를 유지하고 면접관과 자연스럽게 시선을 맞추는가"),
+        ("표정·면접 태도", "안정된 표정과 예의 바른 태도를 유지하며, 질문을 끝까지 경청하는가"),
+        ("답변 속도·시간 관리", "적절한 속도로 답변 시간(1~2분)을 지키며 핵심을 우선 전달하는가"),
+    ]),
+]
+
+def _set_table_fixed_layout(table, widths=None):
+    """표의 열 너비를 지정한 값 그대로 고정합니다 (자동 맞춤 해제).
+    widths를 주면 표의 그리드(gridCol)와 각 셀 너비를 모두 같은 값으로 맞춥니다."""
+    table.autofit = False
+    tblPr = table._tbl.tblPr
+    layout = OxmlElement('w:tblLayout')
+    layout.set(qn('w:type'), 'fixed')
+    tblPr.append(layout)
+
+    if widths:
+        for c, width in enumerate(widths):
+            try:
+                table.columns[c].width = width
+            except (IndexError, ValueError):
+                pass
+        for row in table.rows:
+            for c, width in enumerate(widths):
+                try:
+                    row.cells[c].width = width
+                except IndexError:
+                    pass
+
+def _set_cell_text(cell, text, bold=False, size=9.5, align=None, color=None):
+    """평가표용 셀 텍스트 입력 헬퍼 (글자 크기·정렬 지정 가능)"""
+    set_cell_margins(cell, top=70, bottom=70, left=100, right=100)
+    p = cell.paragraphs[0]
+    p.paragraph_format.line_spacing = 1.15
+    p.paragraph_format.space_before = Pt(2)
+    p.paragraph_format.space_after = Pt(2)
+    if align == "center":
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    lines = str(text).split("\n")
+    for i, line in enumerate(lines):
+        if i > 0:
+            p.add_run("\n")
+        run = p.add_run(line)
+        run.bold = bold
+        run.font.size = Pt(size)
+        if color:
+            run.font.color.rgb = color
+    return p
+
+def _small_spacer(doc, size=6):
+    """문서 사이 여백을 최소한으로 넣기 위한 작은 빈 줄"""
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(0)
+    run = p.add_run("")
+    run.font.size = Pt(size)
+    return p
+
+def _add_write_box(doc, title, height_inches=0.9, fill="F7F9FC", spacer=True):
+    """제목 줄 + 손으로 적을 수 있는 빈 칸 한 세트를 추가합니다."""
+    table = doc.add_table(rows=2, cols=1)
+    table.style = 'Table Grid'
+    _set_table_fixed_layout(table, [Inches(6.1)])
+    set_cell_background(table.rows[0].cells[0], fill)
+    _set_cell_text(table.rows[0].cells[0], title, bold=True, size=10, color=RGBColor(0, 51, 102))
+    _set_cell_text(table.rows[1].cells[0], "", size=10)
+    table.rows[1].height = Inches(height_inches)
+    table.rows[1].height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+    if spacer:
+        _small_spacer(doc)
+    return table
+
+def create_evaluation_sheet_word(result_text, student_name, university, major, interview_type,
+                                  evaluator="", interview_date="", include_questions=True):
+    """교사가 면접 현장에서 바로 채점할 수 있는 인쇄용 평가표를 만듭니다."""
+    doc = Document()
+    set_document_font(doc)
+
+    doc.add_heading("📝 모의면접 평가표 (교사용)", level=1)
+    sub = doc.add_paragraph()
+    sub_run = sub.add_run("도개고등학교 진로진학 모의면접 · 항목당 10점 만점 / 총 100점")
+    sub_run.bold = True
+    sub_run.font.size = Pt(10)
+    sub_run.font.color.rgb = RGBColor(0, 51, 102)
+
+    # ── 기본 정보 ──
+    info_table = doc.add_table(rows=2, cols=4)
+    info_table.style = 'Table Grid'
+    info_pairs = [
+        ("학생명", student_name), ("지원 대학", university),
+        ("지원 학과", major), ("면접 유형", interview_type),
+    ]
+    _set_table_fixed_layout(info_table, [Inches(1.525)] * 4)
+    for idx, (label, value) in enumerate(info_pairs):
+        cell_label = info_table.rows[0].cells[idx]
+        set_cell_background(cell_label, "EBF1FA")
+        _set_cell_text(cell_label, label, bold=True, size=9.5, align="center")
+        _set_cell_text(info_table.rows[1].cells[idx], value or "", size=9.5, align="center")
+    _small_spacer(doc)
+
+    info2 = doc.add_table(rows=1, cols=4)
+    info2.style = 'Table Grid'
+    _set_table_fixed_layout(info2, [Inches(1.2), Inches(1.85), Inches(1.2), Inches(1.85)])
+    set_cell_background(info2.rows[0].cells[0], "EBF1FA")
+    _set_cell_text(info2.rows[0].cells[0], "면접 일자", bold=True, size=9.5, align="center")
+    _set_cell_text(info2.rows[0].cells[1], interview_date or "          .     .     .", size=9.5, align="center")
+    set_cell_background(info2.rows[0].cells[2], "EBF1FA")
+    _set_cell_text(info2.rows[0].cells[2], "평가 교사", bold=True, size=9.5, align="center")
+    _set_cell_text(info2.rows[0].cells[3], evaluator or "", size=9.5, align="center")
+    _small_spacer(doc)
+
+    # ── 채점 척도 안내 ──
+    scale_p = doc.add_paragraph()
+    scale_run = scale_p.add_run(
+        "▣ 채점 척도  |  9~10점 매우 우수    7~8점 우수    5~6점 보통    3~4점 미흡    1~2점 매우 미흡"
+    )
+    scale_run.bold = True
+    scale_run.font.size = Pt(9)
+
+    # ── 평가 항목 표 ──
+    total_items = sum(len(items) for _, items in EVALUATION_RUBRIC)
+    table = doc.add_table(rows=1 + total_items + 2, cols=5)
+    table.style = 'Table Grid'
+
+    headers = ["평가 영역", "평가 항목", "세부 평가 기준", "배점", "점수"]
+    widths = [Inches(0.82), Inches(1.38), Inches(2.8), Inches(0.5), Inches(0.6)]
+    for c, head in enumerate(headers):
+        cell = table.rows[0].cells[c]
+        set_cell_background(cell, "1C4532")
+        _set_cell_text(cell, head, bold=True, size=9.5, align="center", color=RGBColor(255, 255, 255))
+
+    row_idx = 1
+    merge_ranges = []
+    for area_name, items in EVALUATION_RUBRIC:
+        start_row = row_idx
+        for item_name, criterion in items:
+            _set_cell_text(table.rows[row_idx].cells[1], item_name, bold=True, size=9.5)
+            _set_cell_text(table.rows[row_idx].cells[2], criterion, size=9)
+            _set_cell_text(table.rows[row_idx].cells[3], "10", size=9.5, align="center")
+            _set_cell_text(table.rows[row_idx].cells[4], "", size=9.5, align="center")
+            table.rows[row_idx].height = Inches(0.42)
+            table.rows[row_idx].height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+            row_idx += 1
+        merge_ranges.append((area_name, start_row, row_idx - 1))
+
+    # 열 너비 고정 (병합 전에 먼저 지정)
+    _set_table_fixed_layout(table, widths)
+
+    # 합계 / 10점 환산 행 (병합을 먼저 하고 그 뒤에 글자를 채워 빈 줄이 생기지 않게 함)
+    total_row = table.rows[row_idx]
+    score_cell = total_row.cells[4]
+    point_cell = total_row.cells[3]
+    merged_total = total_row.cells[0].merge(total_row.cells[2])
+    set_cell_background(merged_total, "F4F6F9")
+    _set_cell_text(merged_total, "합    계", bold=True, size=10, align="center")
+    _set_cell_text(point_cell, "100", bold=True, size=9.5, align="center")
+    _set_cell_text(score_cell, "", size=9.5, align="center")
+    row_idx += 1
+
+    conv_row = table.rows[row_idx]
+    conv_score_cell = conv_row.cells[4]
+    merged_conv = conv_row.cells[0].merge(conv_row.cells[3])
+    set_cell_background(merged_conv, "F4F6F9")
+    _set_cell_text(merged_conv,
+                   "10점 환산 점수 (합계 ÷ 10)   |   환산 등급  A: 90↑   B: 80~89   C: 70~79   D: 60~69   E: 60 미만",
+                   bold=True, size=9, align="center")
+    _set_cell_text(conv_score_cell, "", size=9.5, align="center")
+
+    # 영역 셀 세로 병합 (내용 영역 / 태도·표현 영역)
+    for area_name, start_row, end_row in merge_ranges:
+        merged = table.rows[start_row].cells[0].merge(table.rows[end_row].cells[0])
+        set_cell_background(merged, "F4F6F9")
+        _set_cell_text(merged, area_name, bold=True, size=9.5, align="center", color=RGBColor(0, 51, 102))
+
+    _small_spacer(doc, size=8)
+
+    # ── 문항별 평가란 ──
+    pairs = extract_qa_pairs(result_text) if include_questions else []
+    if pairs:
+        q_head = doc.add_paragraph()
+        q_head_run = q_head.add_run("▣ 문항별 답변 평가 (각 10점)")
+        q_head_run.bold = True
+        q_head_run.font.size = Pt(10)
+        q_head_run.font.color.rgb = RGBColor(0, 51, 102)
+
+        pairs = pairs[:6]
+        q_table = doc.add_table(rows=1 + len(pairs), cols=4)
+        q_table.style = 'Table Grid'
+        for c, head in enumerate(["번호", "면접 질문", "점수", "특이사항 · 메모"]):
+            cell = q_table.rows[0].cells[c]
+            set_cell_background(cell, "EBF1FA")
+            _set_cell_text(cell, head, bold=True, size=9.5, align="center")
+
+        q_widths = [Inches(0.4), Inches(2.9), Inches(0.55), Inches(2.25)]
+        _set_table_fixed_layout(q_table, q_widths)
+        for i, pair in enumerate(pairs, start=1):
+            q_text = re.sub(r'\s+', ' ', pair["q"]).strip()
+            if len(q_text) > 90:
+                q_text = q_text[:90] + "…"
+            row = q_table.rows[i]
+            _set_cell_text(row.cells[0], str(i), size=9.5, align="center")
+            _set_cell_text(row.cells[1], q_text, size=9)
+            _set_cell_text(row.cells[2], "", size=9.5, align="center")
+            _set_cell_text(row.cells[3], "", size=9)
+            row.height = Inches(0.55)
+            row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+        _small_spacer(doc, size=8)
+
+    # ── 종합 의견란 ──
+    opinion_head = doc.add_paragraph()
+    opinion_run = opinion_head.add_run("▣ 종합 의견")
+    opinion_run.bold = True
+    opinion_run.font.size = Pt(10)
+    opinion_run.font.color.rgb = RGBColor(0, 51, 102)
+
+    _add_write_box(doc, "① 잘한 점 (강점) — 실제 답변 내용을 근거로 구체적으로 기재", height_inches=0.95)
+    _add_write_box(doc, "② 보완할 점 (약점) — 내용·태도 측면 모두 기재", height_inches=0.95)
+    _add_write_box(doc, "③ 다음 연습까지의 지도 방향 및 과제", height_inches=0.9, spacer=False)
+    _small_spacer(doc, size=8)
+
+    # ── 서명란 ──
+    sign_table = doc.add_table(rows=1, cols=4)
+    sign_table.style = 'Table Grid'
+    _set_table_fixed_layout(sign_table, [Inches(1.0), Inches(2.05), Inches(1.5), Inches(1.55)])
+    set_cell_background(sign_table.rows[0].cells[0], "EBF1FA")
+    _set_cell_text(sign_table.rows[0].cells[0], "평가일", bold=True, size=9.5, align="center")
+    _set_cell_text(sign_table.rows[0].cells[1], interview_date or "         .      .      .", size=9.5, align="center")
+    set_cell_background(sign_table.rows[0].cells[2], "EBF1FA")
+    _set_cell_text(sign_table.rows[0].cells[2], "평가 교사 (서명)", bold=True, size=9.5, align="center")
+    _set_cell_text(sign_table.rows[0].cells[3], f"{evaluator}                    (인)" if evaluator else "                             (인)", size=9.5, align="center")
+
+    file_path = f"{student_name}_면접평가표.docx"
+    doc.save(file_path)
+    return file_path
+
+# -------------------------------------------------------------------------
 # [2-2] 여러 회차의 저장 기록을 모아 학생의 "성장 리포트"를 만들기
 #   (새 저장소를 만들지 않고, 기존 list_records()/get_record()로 이미 쌓인 기록을 재사용합니다)
 # -------------------------------------------------------------------------
@@ -936,6 +1187,7 @@ if "easy_explanation_text" not in st.session_state: st.session_state.easy_explan
 if "easy_explanation_file" not in st.session_state: st.session_state.easy_explanation_file = None
 if "summary_card_file" not in st.session_state: st.session_state.summary_card_file = None
 if "growth_report_file" not in st.session_state: st.session_state.growth_report_file = None
+if "evaluation_sheet_file" not in st.session_state: st.session_state.evaluation_sheet_file = None
 
 exam_db = load_exam_db(MASTER_DB_PATH)
 
@@ -1004,12 +1256,24 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                     st.session_state["easy_explanation_file"] = None
                     st.session_state["summary_card_file"] = None
                     st.session_state["growth_report_file"] = None
+                    st.session_state["evaluation_sheet_file"] = None
                     if row["result_text"]:
+                        loaded_type = _rec_get(row, "interview_type", "생기부 기반 면접")
                         stu_path, tea_path = create_word_files(
-                            row["result_text"], row["student_name"], _rec_get(row, "interview_type", "생기부 기반 면접"),
+                            row["result_text"], row["student_name"], loaded_type,
                             f"{row['university']}_{row['major']}"
                         )
                         st.session_state["word_files"] = (stu_path, tea_path)
+                        # 요약카드·평가표는 AI 호출 없이 만들 수 있으므로 불러올 때 함께 다시 생성
+                        try:
+                            st.session_state["summary_card_file"] = create_summary_card_word(
+                                row["result_text"], row["student_name"], row["university"], row["major"], loaded_type
+                            )
+                            st.session_state["evaluation_sheet_file"] = create_evaluation_sheet_word(
+                                row["result_text"], row["student_name"], row["university"], row["major"], loaded_type
+                            )
+                        except Exception:
+                            pass
                     if not _rec_get(row, "student_record_text", ""):
                         st.info("ℹ️ 이 저장 방식은 생기부 원문은 따로 저장하지 않습니다. 문항/대화 내용은 그대로 불러왔고, 생기부 재분석이 필요하면 PDF를 다시 업로드해주세요.")
                     st.success(f"'{row['student_name']}' 학생의 기록을 불러왔습니다.")
@@ -1347,6 +1611,15 @@ with st.expander("👥 여러 학생 한 번에 처리 (일괄 생성)", expande
                             zf.write(b_stu_path, arcname=os.path.basename(b_stu_path))
                             zf.write(b_tea_path, arcname=os.path.basename(b_tea_path))
 
+                            # 학생별 인쇄용 평가표도 함께 묶어줌 (AI 호출 없이 양식만 생성)
+                            try:
+                                b_eval_path = create_evaluation_sheet_word(
+                                    b_result, b_name, b_uni, b_major, "생기부 기반 면접"
+                                )
+                                zf.write(b_eval_path, arcname=os.path.basename(b_eval_path))
+                            except Exception:
+                                pass
+
                             b_record_id = str(uuid.uuid4())
                             save_record(
                                 b_record_id, b_name, b_uni, b_major, "생기부 기반 면접", batch_difficulty,
@@ -1460,6 +1733,15 @@ if st.button("🚀 면접 패키지 생성 시작"):
                 st.session_state.summary_card_file = None
                 st.warning(f"⚠️ 요약카드 생성에 실패했습니다: {e}")
 
+            # 📝 교사용 인쇄 평가표 (AI 호출 없이 양식만 생성)
+            try:
+                st.session_state.evaluation_sheet_file = create_evaluation_sheet_word(
+                    result_text, student_name, uni, major, interview_type
+                )
+            except Exception as e:
+                st.session_state.evaluation_sheet_file = None
+                st.warning(f"⚠️ 평가표 생성에 실패했습니다: {e}")
+
             # 새로 문항을 생성했으니 이전 학생의 성장 리포트 파일은 초기화
             st.session_state.growth_report_file = None
 
@@ -1512,6 +1794,8 @@ if st.session_state.chat_history:
             downloadable.append(("📚 생기부 쉬운 해설 (.docx)", st.session_state.easy_explanation_file))
         if st.session_state.get("summary_card_file"):
             downloadable.append(("🗂️ 면접직전 요약카드 (.docx)", st.session_state.summary_card_file))
+        if st.session_state.get("evaluation_sheet_file"):
+            downloadable.append(("📝 교사용 평가표 (.docx)", st.session_state.evaluation_sheet_file))
         if st.session_state.get("growth_report_file"):
             downloadable.append(("📈 학생 성장 리포트 (.docx)", st.session_state.growth_report_file))
 
@@ -1524,6 +1808,39 @@ if st.session_state.chat_history:
     if st.session_state.get("easy_explanation_text"):
         with st.expander("📚 생기부 쉬운 해설 미리보기 (고등학교 1학년 눈높이)", expanded=False):
             st.markdown(st.session_state.easy_explanation_text)
+
+    # -------------------------------------------------------------------
+    # 📝 교사용 면접 평가표 (인쇄해서 손으로 채점하는 양식)
+    # -------------------------------------------------------------------
+    with st.expander("📝 교사용 면접 평가표 만들기 (인쇄용)", expanded=False):
+        st.caption(
+            "실제 대학 학생부종합전형 면접 평가요소(학업역량·전공적합성·인성·발전가능성)와 면접 태도 평가 기준을 바탕으로 "
+            "**항목당 10점 만점 / 총 100점** 채점표와 종합의견란이 들어간 A4 양식을 만듭니다. 인쇄해서 면접 현장에서 바로 채점하실 수 있습니다."
+        )
+        col_ev1, col_ev2 = st.columns(2)
+        with col_ev1:
+            evaluator_name = st.text_input("평가 교사 성명", value="", placeholder="예: 김기섭", key="evaluator_name_input")
+        with col_ev2:
+            interview_date_input = st.date_input("면접 일자", value=datetime.date.today(), key="interview_date_input")
+        include_q = st.checkbox("생성된 면접 질문을 '문항별 평가란'에 함께 넣기", value=True, key="eval_include_questions")
+
+        if st.button("📝 평가표 만들기", use_container_width=True):
+            try:
+                date_str = interview_date_input.strftime("%Y. %m. %d.") if interview_date_input else ""
+                st.session_state.evaluation_sheet_file = create_evaluation_sheet_word(
+                    st.session_state.get("last_result_text", ""), student_name, uni, major, interview_type,
+                    evaluator=evaluator_name.strip(), interview_date=date_str, include_questions=include_q
+                )
+                st.success("✅ 평가표가 만들어졌습니다. 아래 버튼으로 내려받아 인쇄하세요.")
+            except Exception as e:
+                st.error(f"❌ 평가표 생성에 실패했습니다: {e}")
+
+        if st.session_state.get("evaluation_sheet_file"):
+            with open(st.session_state.evaluation_sheet_file, "rb") as f:
+                st.download_button(
+                    "📥 평가표 다운로드 (.docx)", f, file_name=st.session_state.evaluation_sheet_file,
+                    use_container_width=True, key="dl_eval_sheet_inline"
+                )
 
     st.divider()
 
