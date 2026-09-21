@@ -1251,6 +1251,8 @@ if "last_audio_size" not in st.session_state: st.session_state.last_audio_size =
 if "last_result_text" not in st.session_state: st.session_state.last_result_text = ""
 if "last_examples" not in st.session_state: st.session_state.last_examples = None
 if "current_record_id" not in st.session_state: st.session_state.current_record_id = None
+if "current_record_key" not in st.session_state: st.session_state.current_record_key = None
+if "record_key_map" not in st.session_state: st.session_state.record_key_map = {}
 if "loaded_student_record_text" not in st.session_state: st.session_state.loaded_student_record_text = ""
 if "easy_explanation_text" not in st.session_state: st.session_state.easy_explanation_text = ""
 if "easy_explanation_file" not in st.session_state: st.session_state.easy_explanation_file = None
@@ -1347,6 +1349,12 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                     st.session_state["last_result_text"] = row["result_text"] or ""
                     st.session_state["chat_history"] = json.loads(row["chat_history"]) if row["chat_history"] else []
                     st.session_state["current_record_id"] = row["id"]
+                    _loaded_key = (
+                        f"{row['student_name']}|{row['university']}|{row['major']}|"
+                        f"{_rec_get(row, 'interview_type', '생기부 기반 면접')}"
+                    )
+                    st.session_state["current_record_key"] = _loaded_key
+                    st.session_state.setdefault("record_key_map", {})[_loaded_key] = row["id"]
                     # 생기부 쉬운 해설은 저장소에 보관하지 않으므로, 기록을 불러올 때는 일단 비워두고
                     # 필요하면 '면접 패키지 생성 시작'을 다시 눌러 새로 만들 수 있게 합니다.
                     st.session_state["easy_explanation_text"] = ""
@@ -1852,8 +1860,18 @@ if st.button("🚀 면접 패키지 생성 시작"):
             st.session_state.chat_history = [{"role": "assistant", "content": full_display_text}]
 
             # 📌 이 학생의 생기부·문항·대화를 저장해서, 다음에 다시 열어도 이어서 볼 수 있게 함
-            if not st.session_state.get("current_record_id"):
+            #    ⚠️ 학생이 바뀌었는데 같은 기록 번호를 그대로 쓰면 앞 학생 기록을 덮어쓰게 되므로,
+            #       (학생명·대학·학과·면접유형)이 달라지면 자동으로 '새 기록'을 만듭니다.
+            #    같은 세션에서 학생을 바꿨다가 되돌아와도 원래 기록에 이어 쓰도록
+            #    (학생 구분키 → 기록번호) 표를 세션에 들고 다닙니다.
+            new_record_key = f"{student_name}|{uni}|{major}|{interview_type}"
+            key_map = st.session_state.setdefault("record_key_map", {})
+            if st.session_state.get("current_record_key") != new_record_key:
+                st.session_state.current_record_id = key_map.get(new_record_key) or str(uuid.uuid4())
+            elif not st.session_state.get("current_record_id"):
                 st.session_state.current_record_id = str(uuid.uuid4())
+            st.session_state.current_record_key = new_record_key
+            key_map[new_record_key] = st.session_state.current_record_id
             st.session_state.loaded_student_record_text = student_record
             save_info = save_record(
                 st.session_state.current_record_id, student_name, uni, major, interview_type, difficulty,
@@ -1919,7 +1937,19 @@ if st.session_state.chat_history:
     #    문항 생성·음성 평가·답변 첨삭·피드백 때마다 자동 저장되지만,
     #    자동 저장이 실패했거나 확실히 남겨두고 싶을 때 이 버튼으로 직접 저장할 수 있습니다.
     # -------------------------------------------------------------------
-    save_col1, save_col2 = st.columns([1, 2])
+    save_col1, save_col_new, save_col2 = st.columns([1, 1, 2])
+    with save_col_new:
+        if st.button("🆕 새 기록으로 저장", use_container_width=True, key="manual_save_new_btn",
+                     help="같은 학생이라도 이번 연습을 '새로운 회차'로 따로 남기고 싶을 때 사용하세요. (성장 리포트용 회차가 쌓입니다)"):
+            st.session_state.current_record_id = str(uuid.uuid4())
+            _new_key = f"{student_name}|{uni}|{major}|{interview_type}"
+            st.session_state.current_record_key = _new_key
+            st.session_state.setdefault("record_key_map", {})[_new_key] = st.session_state.current_record_id
+            new_info = save_current_session(student_name, uni, major, interview_type, difficulty, quiet=True)
+            if new_info["ok"]:
+                st.success(f"✅ 새 회차로 저장했습니다. ({new_info['at']} · {new_info['where']})")
+            else:
+                st.error(f"❌ 저장 실패: {new_info['error']}")
     with save_col1:
         if st.button("💾 지금 저장하기", use_container_width=True, key="manual_save_btn"):
             manual_info = save_current_session(student_name, uni, major, interview_type, difficulty, quiet=True)
