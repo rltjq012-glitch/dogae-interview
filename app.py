@@ -171,32 +171,57 @@ st.markdown("""
 # [0] 실제 대학 면접 기출 통합 DB (전국 94개 대학 / 약 1.1만 개 질의응답)
 #     master_interview_qa.csv 파일을 app.py와 같은 폴더에 두면 자동으로 로드됩니다.
 # -------------------------------------------------------------------------
-MASTER_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "master_interview_qa.csv")
-UNIV_INFO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "univ_interview_info.csv")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
+QA_COLUMNS = ["대학", "학과", "전형", "질문", "답변", "원본파일"]
 INFO_COLUMNS = ["대학", "학과", "전형", "면접유형", "면접시간", "면접위원", "면접절차", "유의사항", "선배조언"]
 
-@st.cache_data(show_spinner=False)
-def load_exam_db(path):
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=["대학", "학과", "전형", "질문", "답변", "원본파일"])
-    try:
-        df = pd.read_csv(path, encoding="utf-8-sig")
-        df = df.dropna(subset=["질문", "답변"])
-        return df
-    except Exception:
-        return pd.DataFrame(columns=["대학", "학과", "전형", "질문", "답변", "원본파일"])
+def _find_data_files(folder, stem):
+    """stem으로 시작하는 csv를 모두 찾습니다.
+    GitHub에 올릴 때 이름이 'master_interview_qa (1).csv'처럼 바뀌어도 자동으로 인식하기 위함."""
+    found = []
+    for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        low = name.lower()
+        if low.startswith(stem.lower()) and low.endswith(".csv"):
+            found.append(os.path.join(folder, name))
+    return found
 
 @st.cache_data(show_spinner=False)
-def load_univ_info(path):
-    """2026학년도 면접 후기에서 정리한 대학별 면접 형식 정보
-    (면접 시간 · 면접위원 수 · 면접 절차 · 유의사항 · 선배 조언)"""
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=INFO_COLUMNS)
-    try:
-        return pd.read_csv(path, encoding="utf-8-sig")
-    except Exception:
-        return pd.DataFrame(columns=INFO_COLUMNS)
+def load_exam_db(folder):
+    """앱 폴더에 있는 master_interview_qa*.csv 파일을 모두 읽어 하나로 합칩니다.
+    (구버전·신버전이 같이 올라가 있어도 중복을 걸러 최신 내용까지 모두 사용)
+    반환: (통합 데이터프레임, 읽어들인 파일명 목록)"""
+    frames, loaded = [], []
+    for path in _find_data_files(folder, "master_interview_qa"):
+        try:
+            d = pd.read_csv(path, encoding="utf-8-sig").dropna(subset=["질문", "답변"])
+            if not d.empty:
+                frames.append(d)
+                loaded.append(os.path.basename(path))
+        except Exception:
+            continue
+    if not frames:
+        return pd.DataFrame(columns=QA_COLUMNS), []
+    df = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["대학", "학과", "질문"], keep="first")
+    return df, loaded
+
+@st.cache_data(show_spinner=False)
+def load_univ_info(folder):
+    """대학별 면접 형식 정보(면접 시간 · 면접위원 수 · 절차 · 유의사항 · 선배 조언).
+    univ_interview_info*.csv 파일을 모두 읽어 합칩니다."""
+    frames, loaded = [], []
+    for path in _find_data_files(folder, "univ_interview_info"):
+        try:
+            d = pd.read_csv(path, encoding="utf-8-sig")
+            if not d.empty:
+                frames.append(d)
+                loaded.append(os.path.basename(path))
+        except Exception:
+            continue
+    if not frames:
+        return pd.DataFrame(columns=INFO_COLUMNS), []
+    df = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["대학", "학과", "전형"], keep="first")
+    return df, loaded
 
 def _normalize_dept(name):
     """'간호학과' -> '간호' 처럼 학과명에서 흔한 접미사를 제거해 비교하기 쉽게 만듭니다."""
@@ -287,6 +312,111 @@ def get_relevant_examples(df, major, uni_name, top_n=12):
         return same_uni_any.sample(min(top_n, len(same_uni_any)), random_state=42)
     return df.sample(min(top_n, len(df)), random_state=42)
 
+# -------------------------------------------------------------------------
+# [0-2] 지원 대학의 '출제 스타일' 분석
+#   희망 대학·학과 조합이 DB에 없을 때, 그 대학의 다른 학과 기출에서
+#   질문 화법·유형을 뽑아내어 "그 대학 스타일"을 재현하는 데 사용합니다.
+# -------------------------------------------------------------------------
+QUESTION_TYPE_PATTERNS = {
+    "생기부 활동 확인형": r"(?:했다고|했는데|활동을|경험|참여|한 이유|계기)",
+    "개념 설명·검증형": r"(?:무엇인|설명해|개념|원리|차이|뜻|정의|어떻게 작동|말해보)",
+    "지원동기·진로형": r"(?:지원|왜 우리|진로|되고 싶|장래|졸업 후|입학 후|계획)",
+    "가치관·인성형": r"(?:생각하는|가치|갈등|협력|리더|배려|윤리|어떻게 생각)",
+    "독서 연계형": r"(?:책|읽고|독서|저자)",
+    "압박·심화 꼬리형": r"(?:그렇다면|그럼|추가로|더 깊이|반론|비판|한계|꼬리질문)",
+}
+
+FIELD_KEYWORDS = {
+    "인문·어문": ["국어", "영어", "불어", "독어", "중어", "일어", "노어", "서어", "문학", "사학", "철학", "문헌", "고고", "인문"],
+    "사회과학": ["경영", "경제", "행정", "정치", "사회", "미디어", "광고", "무역", "법", "복지", "심리", "관광", "부동산"],
+    "자연과학": ["수학", "물리", "화학", "생물", "지구", "통계", "천문", "과학"],
+    "공학": ["공학", "기계", "전자", "전기", "컴퓨터", "소프트웨어", "건축", "토목", "재료", "산업", "반도체", "정보", "AI", "인공지능"],
+    "의약·보건": ["의예", "간호", "약학", "보건", "의료", "수의", "치의", "물리치료", "임상"],
+    "교육": ["교육"],
+    "예체능": ["미술", "음악", "체육", "디자인", "무용", "연극", "영화", "실용"],
+    "농생명": ["농", "원예", "축산", "산림", "식품", "조경", "환경"],
+}
+
+def _field_of(dept_name):
+    """학과명을 큰 계열로 분류합니다 (같은 대학 안에서 비슷한 계열 기출을 우선 보여주기 위함)."""
+    s = str(dept_name or "")
+    for field, keys in FIELD_KEYWORDS.items():
+        if any(k in s for k in keys):
+            return field
+    return "기타"
+
+def analyze_university_style(df, uni_name, min_rows=5):
+    """지원 대학 기출 전체를 훑어 '이 대학은 어떤 식으로 묻는가'를 수치로 요약합니다."""
+    if df.empty or not uni_name:
+        return None
+    same = df[df["대학"].apply(lambda u: _uni_matches(uni_name, u))]
+    if len(same) < min_rows:
+        return None
+    q = same["질문"].astype(str)
+    type_ratio = {}
+    for label, pattern in QUESTION_TYPE_PATTERNS.items():
+        try:
+            type_ratio[label] = round(q.str.contains(pattern, regex=True, na=False).mean() * 100)
+        except Exception:
+            type_ratio[label] = 0
+    top_types = sorted(type_ratio.items(), key=lambda kv: kv[1], reverse=True)[:3]
+    return {
+        "대학": str(same["대학"].iloc[0]),
+        "기출수": len(same),
+        "학과수": same["학과"].nunique(),
+        "평균질문길이": round(q.str.len().mean()),
+        "유형비율": type_ratio,
+        "대표유형": top_types,
+    }
+
+def get_university_style_examples(df, uni_name, major, n=8, exclude_index=None):
+    """지원 대학의 출제 스타일을 보여줄 기출 (학과는 달라도 됨).
+    지원 학과와 같은 계열을 우선하고, 한 학과에 쏠리지 않게 골고루 뽑습니다."""
+    if df.empty or not uni_name:
+        return df.head(0)
+    same = df[df["대학"].apply(lambda u: _uni_matches(uni_name, u))]
+    if exclude_index is not None and len(same):
+        same = same.drop(index=[i for i in exclude_index if i in same.index], errors="ignore")
+    if same.empty:
+        return same
+
+    target_field = _field_of(major)
+    same = same.copy()
+    same["_field"] = same["학과"].apply(_field_of)
+    same["_field_rank"] = (same["_field"] != target_field).astype(int)  # 같은 계열이 0
+
+    picked, per_dept = [], {}
+    for _, row in same.sort_values("_field_rank", kind="stable").iterrows():
+        dept = str(row["학과"])
+        if per_dept.get(dept, 0) >= 2:      # 한 학과에서 최대 2개
+            continue
+        per_dept[dept] = per_dept.get(dept, 0) + 1
+        picked.append(row)
+        if len(picked) >= n:
+            break
+    return pd.DataFrame(picked) if picked else same.head(0)
+
+def format_university_style_for_prompt(style, style_examples, has_same_dept_at_uni):
+    """대학 스타일 분석 + 그 대학 기출 예시를 프롬프트 블록으로 만듭니다."""
+    if not style and (style_examples is None or style_examples.empty):
+        return ""
+    lines = [f"\n[A. 지원 대학의 출제 스타일 분석 — {style['대학'] if style else ''}]"]
+    if style:
+        types = ", ".join(f"{label} {ratio}%" for label, ratio in style["대표유형"])
+        lines.append(f"- 분석 표본: 이 대학 실제 기출 {style['기출수']}건 ({style['학과수']}개 학과)")
+        lines.append(f"- 평균 질문 길이: 약 {style['평균질문길이']}자")
+        lines.append(f"- 이 대학이 가장 자주 쓰는 질문 유형: {types}")
+    if style_examples is not None and not style_examples.empty:
+        if has_same_dept_at_uni:
+            lines.append("- 이 대학의 실제 질문 화법 예시 (지원 학과 기출은 아래 B에 별도로 있음):")
+        else:
+            lines.append("- ⚠️ 이 대학의 '지원 학과' 기출은 DB에 없습니다. 아래는 같은 대학 다른 학과 기출이며, "
+                          "**질문하는 방식·말투·난이도·꼬리질문 습관만** 참고 대상입니다 (전공 내용은 참고하지 마세요):")
+        for _, r in style_examples.iterrows():
+            q = re.sub(r"\s+", " ", str(r["질문"])).strip()
+            lines.append(f"  · [{r['학과']}] {q[:160]}")
+    return "\n".join(lines)
+
 def get_univ_info(info_df, uni_name, major):
     """지원 대학의 실제 면접 형식 정보를 찾습니다. 같은 학과가 있으면 그것을 우선합니다."""
     if info_df is None or info_df.empty or not uni_name:
@@ -329,18 +459,85 @@ def format_univ_info_for_prompt(info_row):
     parts.append("※ 위 형식을 반드시 반영해 문항 수와 깊이를 정하세요. 예를 들어 10분 면접이면 지나치게 많은 세부 질문을 넣지 마세요.")
     return "\n".join(parts)
 
-def format_examples_for_prompt(examples_df):
+def format_examples_for_prompt(examples_df, uni_name=""):
     if examples_df.empty:
         return ""
-    lines = ["\n[실전 데이터베이스: 지원 전공과 유사한 전국 대학 실제 면접 기출 사례]"]
-    lines.append("(AI는 아래 실제 사례의 질문 난이도, 표현 방식, 꼬리질문 패턴을 참고하되 문장을 그대로 베끼지 말고 새로 창작하세요.)")
+    lines = ["\n[B. 지원 학과 전공 기출 — 전공적합성과 학술적 깊이의 기준]"]
+    lines.append("(질문의 전공 깊이·검증 수준을 여기서 가져오되, 문장을 그대로 베끼지 말고 학생 생기부 내용으로 새로 창작하세요.)")
     for _, r in examples_df.iterrows():
         q = str(r["질문"]).strip().replace("\n", " ")
         a = str(r["답변"]).strip().replace("\n", " ")
         if len(a) > 220:
             a = a[:220] + "..."
-        lines.append(f"- [{r['대학']} · {r['학과']}] Q: {q}\n  A: {a}")
+        same_mark = " ★지원대학" if (uni_name and _uni_matches(uni_name, str(r["대학"]))) else ""
+        lines.append(f"- [{r['대학']} · {r['학과']}{same_mark}] Q: {q}\n  A: {a}")
     return "\n".join(lines)
+
+def build_reference_strategy(exam_db, uni_name, major, top_n=12, style_n=8):
+    """면접 문항 생성에 쓸 참고자료를 '대학 스타일'과 '학과 전공' 두 갈래로 준비합니다.
+
+    - 지원 대학 + 지원 학과 기출이 있으면 → 그것을 그대로 주력으로 사용 (mode='exact')
+    - 지원 학과 기출은 있는데 그 대학 것이 없으면 → 다른 대학의 같은 학과 기출(전공)
+      + 지원 대학의 다른 학과 기출(스타일)을 결합 (mode='style_transfer')
+    - 학과 기출 자체가 없으면 → 지원 대학 스타일 위주 (mode='uni_only')
+    """
+    examples = get_relevant_examples(exam_db, major, uni_name, top_n=top_n)
+    has_same_dept_at_uni = bool(len(examples)) and any(
+        _uni_matches(uni_name, str(u)) for u in examples["대학"]
+    )
+    style = analyze_university_style(exam_db, uni_name)
+    style_examples = get_university_style_examples(
+        exam_db, uni_name, major, n=style_n,
+        exclude_index=list(examples.index) if len(examples) else None,
+    )
+
+    if has_same_dept_at_uni:
+        mode = "exact"
+    elif len(examples):
+        mode = "style_transfer" if (style or len(style_examples)) else "dept_only"
+    else:
+        mode = "uni_only" if (style or len(style_examples)) else "none"
+
+    # 프롬프트 지시문: 모드별로 AI가 해야 할 일을 명확히 지정
+    if mode == "exact":
+        guide = (
+            f"\n[참고자료 사용 지침]\n"
+            f"- 아래 B에는 **{uni_name} {major}의 실제 기출**이 포함되어 있습니다(★ 표시). "
+            f"이 문항들의 화법·난이도·꼬리질문 방식을 최우선 기준으로 삼으세요.\n"
+            f"- 단, 문장을 그대로 쓰지 말고 **이 학생의 생기부에 실제로 적힌 활동·개념으로 바꿔 재창작**하세요.\n"
+        )
+    elif mode == "style_transfer":
+        guide = (
+            f"\n[참고자료 사용 지침 — ⚠️ 중요]\n"
+            f"- DB에 **{uni_name} {major} 기출은 없습니다.** 그래서 두 가지를 결합해야 합니다.\n"
+            f"- ① A(대학 스타일): {uni_name}의 실제 출제 방식 — **어떤 말투·길이·유형으로 묻는지**를 그대로 따르세요. "
+            f"질문의 형식과 압박 수위는 A를 기준으로 합니다.\n"
+            f"- ② B(학과 전공): 다른 대학의 {major} 기출에서 **전공적합성과 학술적 깊이**를 가져오세요. "
+            f"어떤 개념을 어느 수준까지 파고드는지는 B를 기준으로 합니다.\n"
+            f"- 즉 **'{uni_name}의 말투로 묻는 {major} 전공 질문'**을 만들어야 합니다. "
+            f"A의 다른 학과 전공 내용은 절대 가져오지 마세요.\n"
+        )
+    elif mode == "uni_only":
+        guide = (
+            f"\n[참고자료 사용 지침 — ⚠️ 중요]\n"
+            f"- DB에 {major}와 유사한 학과 기출이 없습니다. A({uni_name}의 출제 스타일)만 참고할 수 있습니다.\n"
+            f"- {uni_name}의 질문 방식은 A를 따르고, **전공 내용은 {major}의 고교 교육과정 연계 개념에서 직접 설계**하세요.\n"
+        )
+    else:
+        guide = "\n[참고자료 사용 지침]\n- 참고 기출이 부족하니 학생 생기부 내용과 전공 개념에 근거해 직접 설계하세요.\n"
+
+    style_text = format_university_style_for_prompt(style, style_examples, has_same_dept_at_uni)
+    dept_text = format_examples_for_prompt(examples, uni_name=uni_name)
+    combined = guide + style_text + "\n" + dept_text
+
+    return {
+        "mode": mode,
+        "examples": examples,
+        "style": style,
+        "style_examples": style_examples,
+        "has_same_dept_at_uni": has_same_dept_at_uni,
+        "prompt_text": combined,
+    }
 
 # -------------------------------------------------------------------------
 # [0-1] 학생별 저장/불러오기 저장소
@@ -1357,8 +1554,8 @@ if "growth_report_file" not in st.session_state: st.session_state.growth_report_
 if "evaluation_sheet_file" not in st.session_state: st.session_state.evaluation_sheet_file = None
 if "last_save_info" not in st.session_state: st.session_state.last_save_info = None
 
-exam_db = load_exam_db(MASTER_DB_PATH)
-univ_info_db = load_univ_info(UNIV_INFO_PATH)
+exam_db, exam_db_files = load_exam_db(APP_DIR)
+univ_info_db, univ_info_files = load_univ_info(APP_DIR)
 
 with st.sidebar:
     # Streamlit Cloud의 Secrets(GEMINI_API_KEY)에 키가 등록되어 있으면 자동으로 사용하고,
@@ -1373,9 +1570,11 @@ with st.sidebar:
         st.warning("⚠️ 실제 기출 DB(master_interview_qa.csv)가 없습니다.\n앱과 같은 폴더에 파일을 넣어주세요.")
     else:
         st.success(f"📊 실제 기출 DB 연동됨\n{len(exam_db):,}건 / {exam_db['대학'].nunique()}개 대학")
+        if len(exam_db_files) > 1:
+            st.caption("📎 읽은 파일 " + ", ".join(exam_db_files) + " (중복은 자동 제거)")
 
     if univ_info_db.empty:
-        st.info("📋 대학별 면접 형식 정보(univ_interview_info.csv)가 없습니다.")
+        st.info("📋 대학별 면접 형식 정보(univ_interview_info.csv)가 없습니다.\n파일을 올리면 대학별 면접 시간·위원 수까지 반영됩니다.")
     else:
         st.success(f"📋 2026 면접 형식 정보\n{univ_info_db['대학'].nunique()}개 대학 / {len(univ_info_db)}개 학과")
 
@@ -1765,7 +1964,7 @@ def build_sangbu_prompt(student_name, uni, major, student_record, combined_exam_
     1. **출력의 맨 첫 부분**에 반드시 **[생기부 심층 분석 브리핑 리포트]**를 작성하세요. 단순 요약이 아닌, 실제 입학사정관의 눈으로 학생의 생기부를 현미경처럼 해부하여 구체적인 활동명과 과목명을 직접 언급하며 **매우 디테일하고 상세하게 분량 있게** 분석해야 합니다. 단점 방어 전략도 필수로 기재하세요.
     2. 생기부 5대 영역(교과세특, 창체, 동아리, 행특, 독서 등)을 모두 분석하여 총 5세트의 면접 문항을 만드세요.
     3. 과목명이나 주요 활동명은 반드시 **[생활과 윤리]** 처럼 볼드체로 묶어주고 학습된 기출 데이터 패턴 수준의 날카로운 꼬리질문을 포함하세요.
-    4. 위 [실전 데이터베이스]에 제시된 실제 사례가 있다면, 그 질문의 깊이와 화법을 반드시 참고하여 이 학생의 활동에 맞게 재창작하세요.
+    4. 위 [참고자료 사용 지침]을 반드시 그대로 따르세요. A(지원 대학의 출제 스타일)는 **질문하는 방식·말투·길이·압박 수위**의 기준이고, B(지원 학과 전공 기출)는 **전공적합성과 학술적 깊이**의 기준입니다. 둘을 결합해 '이 대학이 실제로 묻는 방식으로, 이 학과 전공 수준에 맞게, 이 학생의 생기부 내용을 파고드는' 질문을 만드세요. A에 나온 다른 학과의 전공 내용은 절대 가져오지 마세요.
     5. 각 질문마다 [평가요소]에는 그 질문이 학생부종합전형 평가요소(학업역량/전공적합성/인성/발전가능성) 중 실제로 무엇을 검증하려는 질문인지 정확하게 판단해서 적으세요.
 
     [출력 템플릿 엄수 - 파싱을 위해 키워드 대괄호를 절대 변경하지 마세요]
@@ -1827,9 +2026,11 @@ with st.expander("👥 여러 학생 한 번에 처리 (일괄 생성)", expande
                             b_file.seek(0)
                             b_student_record = extract_text_from_pdf(b_file)
 
-                            b_examples = get_relevant_examples(exam_db, b_major, b_uni, top_n=12)
-                            b_dynamic_text = format_examples_for_prompt(b_examples)
-                            b_combined = PAST_EXAM_DATA + ("\n" + b_dynamic_text if b_dynamic_text else "")
+                            b_strategy = build_reference_strategy(exam_db, b_uni, b_major, top_n=12, style_n=8)
+                            b_combined = PAST_EXAM_DATA + ("\n" + b_strategy["prompt_text"] if b_strategy["prompt_text"] else "")
+                            b_info_text = format_univ_info_for_prompt(get_univ_info(univ_info_db, b_uni, b_major))
+                            if b_info_text:
+                                b_combined += "\n" + b_info_text
 
                             b_prompt = build_sangbu_prompt(b_name, b_uni, b_major, b_student_record, b_combined)
                             b_result = call_gemini(b_prompt, api_key)
@@ -1884,9 +2085,9 @@ if st.button("🚀 면접 패키지 생성 시작"):
         student_record = st.session_state.get("loaded_student_record_text", "")
     st.session_state.loaded_student_record_text = student_record
 
-    # 🔎 실제 기출 DB에서 지원 학과와 유사한 사례를 찾아 프롬프트에 결합
-    relevant_examples = get_relevant_examples(exam_db, major, uni, top_n=12)
-    dynamic_exam_text = format_examples_for_prompt(relevant_examples)
+    # 🔎 참고자료를 'A: 지원 대학 출제 스타일'과 'B: 지원 학과 전공 기출' 두 갈래로 준비
+    strategy = build_reference_strategy(exam_db, uni, major, top_n=12, style_n=8)
+    relevant_examples = strategy["examples"]
 
     # 📋 2026학년도 후기 기준 '그 대학의 실제 면접 형식'도 함께 반영 (시간·면접위원·유의사항)
     univ_info_row = get_univ_info(univ_info_db, uni, major)
@@ -1894,11 +2095,20 @@ if st.button("🚀 면접 패키지 생성 시작"):
     st.session_state.last_univ_info = univ_info_row
 
     combined_exam_data = PAST_EXAM_DATA
-    if dynamic_exam_text:
-        combined_exam_data += "\n" + dynamic_exam_text
+    if strategy["prompt_text"]:
+        combined_exam_data += "\n" + strategy["prompt_text"]
     if univ_info_text:
         combined_exam_data += "\n" + univ_info_text
     st.session_state.last_examples = relevant_examples
+    st.session_state.last_strategy = {
+        "mode": strategy["mode"],
+        "style": strategy["style"],
+        "style_examples": strategy["style_examples"],
+        "has_same_dept_at_uni": strategy["has_same_dept_at_uni"],
+        # 생성 당시의 대학·학과를 함께 보관 (이후 드롭다운을 바꿔도 안내문이 어긋나지 않도록)
+        "uni": uni,
+        "major": major,
+    }
 
     if interview_type == "생기부 기반 면접":
         prompt = f"""
@@ -1911,7 +2121,7 @@ if st.button("🚀 면접 패키지 생성 시작"):
         1. **출력의 맨 첫 부분**에 반드시 **[생기부 심층 분석 브리핑 리포트]**를 작성하세요. 단순 요약이 아닌, 실제 입학사정관의 눈으로 학생의 생기부를 현미경처럼 해부하여 구체적인 활동명과 과목명을 직접 언급하며 **매우 디테일하고 상세하게 분량 있게** 분석해야 합니다. 단점 방어 전략도 필수로 기재하세요.
         2. 생기부 5대 영역(교과세특, 창체, 동아리, 행특, 독서 등)을 모두 분석하여 총 5세트의 면접 문항을 만드세요.
         3. 과목명이나 주요 활동명은 반드시 **[생활과 윤리]** 처럼 볼드체로 묶어주고 학습된 기출 데이터 패턴 수준의 날카로운 꼬리질문을 포함하세요.
-        4. 위 [실전 데이터베이스]에 제시된 실제 사례가 있다면, 그 질문의 깊이와 화법을 반드시 참고하여 이 학생의 활동에 맞게 재창작하세요.
+        4. 위 [참고자료 사용 지침]을 반드시 그대로 따르세요. A(지원 대학의 출제 스타일)는 **질문하는 방식·말투·길이·압박 수위**의 기준이고, B(지원 학과 전공 기출)는 **전공적합성과 학술적 깊이**의 기준입니다. 둘을 결합해 '이 대학이 실제로 묻는 방식으로, 이 학과 전공 수준에 맞게, 이 학생의 생기부 내용을 파고드는' 질문을 만드세요. A에 나온 다른 학과의 전공 내용은 절대 가져오지 마세요.
         5. 각 질문마다 [평가요소]에는 그 질문이 학생부종합전형 평가요소(학업역량/전공적합성/인성/발전가능성) 중 실제로 무엇을 검증하려는 질문인지 정확하게 판단해서 적으세요. (형식적으로 아무거나 적지 말고, 질문 내용과 실제로 맞는 요소를 고르세요)
 
         [출력 템플릿 엄수 - 파싱을 위해 키워드 대괄호를 절대 변경하지 마세요]
@@ -1930,7 +2140,7 @@ if st.button("🚀 면접 패키지 생성 시작"):
         [지시사항]
         1. 생기부 내용은 무시하세요. {major} 학과와 관련된 학술적 딜레마와 심층 개념을 담은 **완전 독립된 3개의 주제 세트**를 창작하세요.
         2. **각 세트마다 복수의 제시문((가), (나), (다) 형태)과 [문제 1], [문제 2] (각각 평가의도, 모범답안, 압박 꼬리질문 포함)**가 유기적으로 묶인 **총 3개의 독립 세트**를 엄격히 만드세요.
-        3. 위 [실전 데이터베이스]의 실제 사례가 있다면 질문의 수준과 화법을 참고해 {major}에 맞게 새로 창작하세요.
+        3. 위 [참고자료 사용 지침]을 따르세요. A(지원 대학 출제 스타일)에서 **제시문·문제의 화법과 난이도**를, B(지원 학과 전공 기출)에서 **전공 개념의 깊이**를 가져와 {major}에 맞게 새로 창작하세요.
         4. 서론이나 인사말은 절대 쓰지 말고, 바로 '### 📌 [세트 1]' 부터 출력하세요.
         5. 각 문제마다 [평가요소 N]에는 그 문제가 학생부종합전형 평가요소(학업역량/전공적합성/인성/발전가능성) 중 실제로 무엇을 검증하려는지 정확하게 판단해서 적으세요.
 
@@ -2031,21 +2241,66 @@ if st.button("🚀 면접 패키지 생성 시작"):
 # 이번 생성에 실제로 참고된 기출 사례를 투명하게 보여줌
 if st.session_state.get("last_examples") is not None and not st.session_state.last_examples.empty:
     _ex = st.session_state.last_examples
-    with st.expander(f"🔎 이번 문항 생성에 참고한 실제 기출 사례 보기 ({len(_ex)}건)", expanded=False):
-        # 어떤 기준으로 뽑혔는지 먼저 요약해서 보여줌 (학과 우선 → 같은 대학 우선 순)
-        _uni_key = _normalize_uni(uni)
-        _same_cnt = sum(1 for u in _ex["대학"] if _uni_matches(uni, str(u)))
+    _strat = st.session_state.get("last_strategy") or {}
+    _mode = _strat.get("mode", "")
+    # 생성 당시의 대학·학과를 사용 (생성 후 드롭다운을 바꿔도 안내문이 어긋나지 않게)
+    _g_uni = _strat.get("uni") or uni
+    _g_major = _strat.get("major") or major
+    _mode_label = {
+        "exact": "✅ 지원 대학·학과 기출 직접 활용",
+        "style_transfer": "🔀 대학 스타일 + 타 대학 같은 학과 전공 결합",
+        "dept_only": "📘 타 대학 같은 학과 기출 기반",
+        "uni_only": "🏫 지원 대학 스타일 기반",
+    }.get(_mode, "기출 참고")
+
+    with st.expander(f"🔎 이번 문항 생성 참고자료 보기 — {_mode_label} (학과 기출 {len(_ex)}건)", expanded=False):
+        _same_cnt = sum(1 for u in _ex["대학"] if _uni_matches(_g_uni, str(u)))
         _depts = sorted(set(str(d) for d in _ex["학과"]))
-        st.info(
-            f"**매칭 기준** — 지원 학과({major})와 같거나 가장 가까운 학과의 기출을 먼저 고르고, "
-            f"그 안에서 지원 대학({uni}) 기출을 앞쪽에 배치합니다.\n\n"
-            f"- 참고한 학과: {', '.join(_depts)}\n"
-            f"- {uni} 기출: **{_same_cnt}건** / 다른 대학 같은·유사 학과: **{len(_ex) - _same_cnt}건**"
-            + ("\n\n※ 지원 대학의 해당 학과 기출이 DB에 없어 다른 대학의 같은 학과 기출로 채웠습니다."
-               if _same_cnt == 0 else "")
-        )
+
+        if _mode == "exact":
+            st.success(
+                f"**{_g_uni} {_g_major}의 실제 기출이 DB에 있습니다.** 그 문항들의 화법·난이도를 그대로 기준 삼아 "
+                f"이 학생의 생기부 내용으로 재창작하도록 지시했습니다.\n\n"
+                f"- {_g_uni} 기출 **{_same_cnt}건** (⭐ 표시) / 타 대학 같은·유사 학과 {len(_ex) - _same_cnt}건\n"
+                f"- 참고 학과: {', '.join(_depts)}"
+            )
+        elif _mode == "style_transfer":
+            st.warning(
+                f"**{_g_uni} {_g_major} 기출은 DB에 없습니다.** 그래서 두 갈래로 나눠 결합했습니다.\n\n"
+                f"- **A. 출제 스타일** ← {_g_uni}의 다른 학과 기출에서 말투·질문 유형·압박 수위만 가져옴\n"
+                f"- **B. 전공 깊이** ← 타 대학 {', '.join(_depts)} 기출 {len(_ex)}건에서 전공적합성 기준을 가져옴\n\n"
+                f"→ AI에게 **'{_g_uni}의 말투로 묻는 {_g_major} 전공 질문'**을 만들도록 지시했습니다."
+            )
+        elif _mode == "uni_only":
+            st.warning(
+                f"**{_g_major}와 유사한 학과 기출이 DB에 없습니다.** {_g_uni}의 출제 스타일만 참고하고, "
+                f"전공 내용은 고교 교육과정 연계 개념에서 직접 설계하도록 지시했습니다."
+            )
+        else:
+            st.info(
+                f"지원 학과({_g_major})와 같거나 가장 가까운 학과 기출을 사용했습니다. "
+                f"({_g_uni} 기출 {_same_cnt}건 / 타 대학 {len(_ex) - _same_cnt}건)"
+            )
+
+        # A. 대학 스타일 분석 결과
+        _style = _strat.get("style")
+        if _style:
+            _types = " · ".join(f"{k} {v}%" for k, v in _style["대표유형"])
+            st.markdown(
+                f"##### 🏫 A. {_style['대학']} 출제 스타일 분석\n"
+                f"기출 {_style['기출수']}건({_style['학과수']}개 학과) 분석 · 평균 질문 길이 약 {_style['평균질문길이']}자\n\n"
+                f"**자주 쓰는 질문 유형:** {_types}"
+            )
+            _sx = _strat.get("style_examples")
+            if _sx is not None and len(_sx):
+                st.caption("이 대학의 실제 질문 화법 예시 (전공 내용이 아니라 '묻는 방식'만 참고)")
+                for _, r in _sx.iterrows():
+                    st.markdown(f"　· *[{r['학과']}]* {str(r['질문'])[:150]}")
+
+        # B. 학과 전공 기출
+        st.markdown(f"##### 📘 B. {_g_major} 전공 기출 ({len(_ex)}건)")
         for _, r in _ex.iterrows():
-            _mark = "⭐ " if _uni_matches(uni, str(r["대학"])) else ""
+            _mark = "⭐ " if _uni_matches(_g_uni, str(r["대학"])) else ""
             st.markdown(f"{_mark}**[{r['대학']} · {r['학과']}]** {r['질문']}")
             st.caption(str(r['답변'])[:200] + ("..." if len(str(r['답변'])) > 200 else ""))
 
