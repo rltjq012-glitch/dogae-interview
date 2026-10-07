@@ -8,6 +8,8 @@ if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
 import streamlit as st
+import ast
+import math
 import time
 import pymupdf
 import os
@@ -547,6 +549,53 @@ def build_reference_strategy(exam_db, uni_name, major, top_n=12, style_n=8):
 #     Google Sheets에 반영구적으로 저장합니다(앱이 재배포돼도 사라지지 않음).
 #   - 등록되어 있지 않으면 예전처럼 로컬 SQLite 파일에 저장합니다(재배포 시 초기화될 수 있음).
 # -------------------------------------------------------------------------
+
+# -------------------------------------------------------------------------
+# [0-0] JSON 안전 파서 / 직렬화 헬퍼
+#   구글시트(Apps Script) 셀에는 공백, "None", "nan" 같은 값이나 잘린 문자열이
+#   들어가 있을 수 있어서, json.loads()를 그대로 쓰면 앱 전체가 멈춥니다.
+#   아래 헬퍼는 어떤 값이 와도 예외 없이 기본값으로 돌려줍니다.
+# -------------------------------------------------------------------------
+SHEET_CELL_LIMIT = 45000  # 구글시트 셀 상한(5만 자)보다 여유 있게
+
+def load_json_safe(value, default=None):
+    """어떤 값이 와도 예외를 던지지 않는 json.loads."""
+    if default is None:
+        default = []
+    if value is None:
+        return default
+    if isinstance(value, (list, dict)):   # 이미 파싱된 경우
+        return value
+    if isinstance(value, float) and math.isnan(value):  # pandas NaN
+        return default
+    text = str(value).strip()
+    if not text or text.lower() in ("none", "nan", "null", "-", "#error!", "#n/a"):
+        return default
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    try:  # str(list)처럼 작은따옴표로 저장된 경우 구제
+        parsed = ast.literal_eval(text)
+        if isinstance(parsed, (list, dict)):
+            return parsed
+    except Exception:
+        pass
+    return default
+
+def dump_chat_history(chat_history, limit=SHEET_CELL_LIMIT):
+    """대화 내역을 JSON 문자열로 만들되, 구글시트 셀 상한을 넘지 않게
+    오래된 메시지부터 잘라냅니다. (중간에서 잘린 JSON은 다시 못 읽기 때문)"""
+    history = list(chat_history or [])
+    text = json.dumps(history, ensure_ascii=False)
+    while len(text) > limit and len(history) > 1:
+        history = history[1:]
+        text = json.dumps(history, ensure_ascii=False)
+    if len(text) > limit:   # 메시지 한 개가 통째로 너무 길 때
+        history = []
+        text = "[]"
+    return text
+
 RECORD_COLUMNS = [
     "id", "student_name", "university", "major", "interview_type",
     "difficulty", "student_record_text", "result_text", "chat_history", "updated_at"
@@ -606,7 +655,7 @@ def _sqlite_save_record(record_id, student_name, university, major, interview_ty
             chat_history=excluded.chat_history, updated_at=excluded.updated_at
     """, (
         record_id, student_name, university, major, interview_type, difficulty,
-        student_record_text, result_text, json.dumps(chat_history, ensure_ascii=False),
+        student_record_text, result_text, dump_chat_history(chat_history),
         datetime.datetime.now().isoformat(timespec="seconds")
     ))
     conn.commit()
@@ -644,7 +693,7 @@ def _sheets_save_record(record_id, student_name, university, major, interview_ty
     ws, all_values = _sheets_all_values()
     row_data = [
         record_id, student_name, university, major, interview_type, difficulty,
-        student_record_text, result_text, json.dumps(chat_history, ensure_ascii=False),
+        student_record_text, result_text, dump_chat_history(chat_history),
         datetime.datetime.now().isoformat(timespec="seconds")
     ]
     row_idx = None
@@ -691,7 +740,7 @@ def _appsscript_save_record(record_id, student_name, university, major, intervie
         "id": record_id, "student_name": student_name, "university": university, "major": major,
         "interview_type": interview_type, "difficulty": difficulty,
         "student_record_text": student_record_text, "result_text": result_text,
-        "chat_history": json.dumps(chat_history, ensure_ascii=False),
+        "chat_history": dump_chat_history(chat_history),
         "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
     }
     resp = requests.post(st.secrets["APPS_SCRIPT_URL"], json=payload, timeout=30)
@@ -1648,7 +1697,7 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                     st.session_state["difficulty_radio"] = _rec_get(row, "difficulty", "중 (표준)")
                     st.session_state["loaded_student_record_text"] = _rec_get(row, "student_record_text", "")
                     st.session_state["last_result_text"] = row["result_text"] or ""
-                    st.session_state["chat_history"] = json.loads(row["chat_history"]) if row["chat_history"] else []
+                    st.session_state["chat_history"] = load_json_safe(_rec_get(row, "chat_history", ""), [])
                     st.session_state["current_record_id"] = row["id"]
                     _loaded_key = (
                         f"{row['student_name']}|{row['university']}|{row['major']}|"
@@ -1708,10 +1757,7 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                                 full = get_record(r["id"])
                                 if not full:
                                     continue
-                                try:
-                                    chat_hist = json.loads(full["chat_history"]) if full["chat_history"] else []
-                                except Exception:
-                                    chat_hist = []
+                                chat_hist = load_json_safe(_rec_get(full, "chat_history", ""), [])
                                 sessions.append({
                                     "updated_at": full["updated_at"],
                                     "university": full["university"],
