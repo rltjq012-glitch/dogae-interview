@@ -9,7 +9,10 @@ if hasattr(sys.stderr, 'reconfigure'):
 
 import streamlit as st
 import ast
+import hmac
 import math
+import shutil
+import tempfile
 import time
 import pymupdf
 import os
@@ -551,6 +554,158 @@ def build_reference_strategy(exam_db, uni_name, major, top_n=12, style_n=8):
 # -------------------------------------------------------------------------
 
 # -------------------------------------------------------------------------
+# [0-A] 교사 로그인 / 기록 소유권 / 출력 파일 경로  (교내 시범운영용)
+#   - Streamlit Secrets에 [teachers] 표가 있으면 로그인이 켜집니다.
+#         [teachers]
+#         "김기섭" = "비밀번호"
+#         "홍길동" = "비밀번호"
+#   - [teachers]가 없으면 로그인 없이 예전과 똑같이 동작합니다.
+#   - 관리자는 ADMIN_TEACHERS = "김기섭" 으로 지정합니다(쉼표로 여러 명).
+#     지정하지 않으면 [teachers]의 첫 번째 계정이 관리자입니다.
+#   - 기록 id를 "교사아이디::uuid" 형태로 만들어, 구글시트 열 구조를 바꾸지 않고도
+#     교사별로 기록을 나눕니다. 예전 기록(id에 "::"가 없음)은 관리자에게만 보입니다.
+# -------------------------------------------------------------------------
+OWNER_SEP = "::"
+_ADMIN_KEY = "ADMIN_TEACHERS"
+
+def _split_names(value):
+    if isinstance(value, (list, tuple)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return [v.strip() for v in str(value or "").split(",") if v.strip()]
+
+def _auth_config():
+    """(계정 dict, 관리자 아이디 목록)을 돌려줍니다. 설정이 없으면 ({}, [])."""
+    try:
+        if "teachers" not in st.secrets:
+            return {}, []
+        table = dict(st.secrets["teachers"])
+        admins = []
+        # TOML에서는 [teachers] 아래에 적은 키가 전부 그 표에 들어가므로,
+        # ADMIN_TEACHERS를 표 안에 적었더라도 계정이 아니라 설정으로 취급합니다.
+        if _ADMIN_KEY in table:
+            admins = _split_names(table.pop(_ADMIN_KEY))
+        if _ADMIN_KEY in st.secrets:
+            admins = _split_names(st.secrets[_ADMIN_KEY]) or admins
+        accounts = {
+            str(k).strip(): str(v) for k, v in table.items()
+            if str(k).strip() and OWNER_SEP not in str(k) and str(v)
+        }
+        if not admins and accounts:
+            admins = [next(iter(accounts))]
+        return accounts, admins
+    except Exception:
+        return {}, []
+
+def auth_enabled():
+    return bool(_auth_config()[0])
+
+def current_teacher():
+    """로그인한 교사 아이디. 로그인이 꺼져 있으면 None."""
+    accounts, _ = _auth_config()
+    teacher = st.session_state.get("auth_teacher")
+    return teacher if (accounts and teacher in accounts) else None
+
+def is_admin():
+    teacher = current_teacher()
+    return bool(teacher) and teacher in _auth_config()[1]
+
+def logout():
+    out_dir = st.session_state.get("_out_dir")
+    if out_dir:
+        shutil.rmtree(out_dir, ignore_errors=True)
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
+
+def require_login():
+    """로그인이 켜져 있는데 아직 로그인하지 않았다면 로그인 화면만 보여주고 멈춥니다."""
+    accounts, _ = _auth_config()
+    if not accounts:
+        return
+    if st.session_state.get("auth_teacher") in accounts:
+        return
+    st.session_state.pop("auth_teacher", None)
+
+    st.title("🎓 도개고 면접 마스터")
+    st.caption("교내 시범운영 중입니다. 배정받은 아이디와 비밀번호로 로그인해 주세요.")
+
+    locked_until = st.session_state.get("_login_locked_until", 0)
+    if time.time() < locked_until:
+        st.error(f"로그인 시도가 너무 많습니다. {int(locked_until - time.time()) + 1}초 뒤에 다시 시도해 주세요.")
+        st.stop()
+
+    with st.form("login_form"):
+        teacher_id = st.text_input("아이디")
+        password = st.text_input("비밀번호", type="password")
+        submitted = st.form_submit_button("로그인", use_container_width=True)
+
+    if submitted:
+        teacher_id = (teacher_id or "").strip()
+        expected = accounts.get(teacher_id)
+        ok = expected is not None and hmac.compare_digest(
+            (password or "").encode("utf-8"), expected.encode("utf-8")
+        )
+        if ok:
+            st.session_state["auth_teacher"] = teacher_id
+            st.session_state["_login_fails"] = 0
+            st.rerun()
+        fails = st.session_state.get("_login_fails", 0) + 1
+        st.session_state["_login_fails"] = fails
+        if fails >= 5:
+            st.session_state["_login_locked_until"] = time.time() + 60
+            st.session_state["_login_fails"] = 0
+        time.sleep(1)
+        st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+    st.stop()
+
+def new_record_id():
+    """새 기록 id. 로그인 중이면 소유 교사를 id 앞에 붙입니다."""
+    rid = str(uuid.uuid4())
+    teacher = current_teacher()
+    return f"{teacher}{OWNER_SEP}{rid}" if teacher else rid
+
+def record_owner(record_id):
+    rid = str(record_id or "")
+    return rid.rsplit(OWNER_SEP, 1)[0] if OWNER_SEP in rid else ""
+
+def can_access_record(record_id):
+    if not auth_enabled():
+        return True
+    teacher = current_teacher()
+    if not teacher:
+        return False
+    return is_admin() or record_owner(record_id) == teacher
+
+# ---- 출력 파일 경로: 접속(세션)마다 다른 임시 폴더를 써서,
+#      여러 교사가 동시에 같은 이름의 학생을 작업해도 서로의 파일을 덮어쓰지 않게 합니다.
+_OUT_DIR_PREFIX = "interview_out_"
+
+def _safe_filename(name):
+    name = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", str(name)).strip(" .")
+    stem, ext = os.path.splitext(name)
+    return (stem[:60] or "문서") + ext[:10]
+
+def _prune_old_out_dirs(max_age_hours=24):
+    """하루 넘게 지난 임시 폴더를 지워, 학생 이름이 들어간 파일이 서버에 쌓이지 않게 합니다."""
+    base = tempfile.gettempdir()
+    cutoff = time.time() - max_age_hours * 3600
+    try:
+        for entry in os.listdir(base):
+            path = os.path.join(base, entry)
+            if entry.startswith(_OUT_DIR_PREFIX) and os.path.isdir(path) and os.path.getmtime(path) < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
+
+def _out_path(filename):
+    out_dir = st.session_state.get("_out_dir")
+    if not out_dir or not os.path.isdir(out_dir):
+        _prune_old_out_dirs()
+        out_dir = tempfile.mkdtemp(prefix=_OUT_DIR_PREFIX)
+        st.session_state["_out_dir"] = out_dir
+    return os.path.join(out_dir, _safe_filename(filename))
+
+# -------------------------------------------------------------------------
 # [0-0] JSON 안전 파서 / 직렬화 헬퍼
 #   구글시트(Apps Script) 셀에는 공백, "None", "nan" 같은 값이나 잘린 문자열이
 #   들어가 있을 수 있어서, json.loads()를 그대로 쓰면 앱 전체가 멈춥니다.
@@ -830,7 +985,7 @@ def save_record(*args, quiet=False, **kwargs):
     st.session_state["last_save_info"] = info
     return info
 
-def list_records():
+def _list_records_raw():
     if _appsscript_enabled():
         try:
             return _appsscript_list_records()
@@ -845,7 +1000,7 @@ def list_records():
             return []
     return _sqlite_list_records()
 
-def get_record(record_id):
+def _get_record_raw(record_id):
     if _appsscript_enabled():
         try:
             return _appsscript_get_record(record_id)
@@ -860,7 +1015,7 @@ def get_record(record_id):
             return None
     return _sqlite_get_record(record_id)
 
-def delete_record(record_id):
+def _delete_record_raw(record_id):
     if _appsscript_enabled():
         try:
             return _appsscript_delete_record(record_id)
@@ -875,11 +1030,26 @@ def delete_record(record_id):
             return
     return _sqlite_delete_record(record_id)
 
+def list_records():
+    """로그인한 교사가 볼 수 있는 기록만 돌려줍니다(관리자는 전체)."""
+    return [r for r in _list_records_raw() if can_access_record(r["id"])]
+
+def get_record(record_id):
+    if not can_access_record(record_id):
+        return None
+    return _get_record_raw(record_id)
+
+def delete_record(record_id):
+    if not can_access_record(record_id):
+        st.warning("⚠️ 이 기록을 삭제할 권한이 없습니다.")
+        return
+    return _delete_record_raw(record_id)
+
 def save_current_session(student_name, university, major, interview_type, difficulty, quiet=False):
     """지금 화면에 올라와 있는 내용(생기부 텍스트·문항·대화 내역)을 그대로 저장합니다.
     자동 저장과 수동 저장('💾 지금 저장하기') 모두 이 함수를 사용합니다."""
     if not st.session_state.get("current_record_id"):
-        st.session_state.current_record_id = str(uuid.uuid4())
+        st.session_state.current_record_id = new_record_id()
     return save_record(
         st.session_state.current_record_id, student_name, university, major, interview_type, difficulty,
         st.session_state.get("loaded_student_record_text", ""),
@@ -1195,8 +1365,8 @@ def create_word_files(content, student_name, interview_type, target_desc):
                     add_parsed_text_to_cell(row_f.cells[0], f"**[압박용 꼬리질문]**\n{f_text}")
             doc.add_paragraph()
 
-    student_path = f"{student_name}_{target_desc}_{type_label}_학생용.docx"
-    teacher_path = f"{student_name}_{target_desc}_{type_label}_교사용.docx"
+    student_path = _out_path(f"{student_name}_{target_desc}_{type_label}_학생용.docx")
+    teacher_path = _out_path(f"{student_name}_{target_desc}_{type_label}_교사용.docx")
     doc_student.save(student_path)
     doc_teacher.save(teacher_path)
     return student_path, teacher_path
@@ -1216,7 +1386,7 @@ def create_chat_history_word(chat_history, student_name):
             run = p.add_run(part)
             if i % 2 != 0: run.bold = True
         doc.add_paragraph("-" * 50)
-    file_path = f"{student_name}_피드백_대화내역.docx"
+    file_path = _out_path(f"{student_name}_피드백_대화내역.docx")
     doc.save(file_path)
     return file_path
 
@@ -1230,7 +1400,7 @@ def create_easy_explanation_word(explanation_text, student_name, target_desc):
         "어려운 용어와 활동명을 고등학교 1학년 눈높이로 쉽게 풀어 설명한 자료입니다.\n"
     )
     add_intro_paragraphs(doc, explanation_text)
-    file_path = f"{student_name}_생기부_쉬운해설.docx"
+    file_path = _out_path(f"{student_name}_생기부_쉬운해설.docx")
     doc.save(file_path)
     return file_path
 
@@ -1289,7 +1459,7 @@ def create_summary_card_word(result_text, student_name, university, major, inter
             add_parsed_text_to_cell(row_a.cells[0], f"**핵심 포인트:** {point}")
             doc.add_paragraph()
 
-    file_path = f"{student_name}_면접직전_요약카드.docx"
+    file_path = _out_path(f"{student_name}_면접직전_요약카드.docx")
     doc.save(file_path)
     return file_path
 
@@ -1539,7 +1709,7 @@ def create_evaluation_sheet_word(result_text, student_name, university, major, i
     _set_cell_text(sign_table.rows[0].cells[2], "평가 교사 (서명)", bold=True, size=9.5, align="center")
     _set_cell_text(sign_table.rows[0].cells[3], f"{evaluator}                    (인)" if evaluator else "                             (인)", size=9.5, align="center")
 
-    file_path = f"{student_name}_면접평가표.docx"
+    file_path = _out_path(f"{student_name}_면접평가표.docx")
     doc.save(file_path)
     return file_path
 
@@ -1580,7 +1750,7 @@ def create_growth_report_word(report_text, student_name):
     doc.add_heading(f"📈 [{student_name}] 학생 모의면접 성장 리포트", level=1)
     doc.add_paragraph("여러 차례의 모의면접 연습 기록을 바탕으로 정리한 성장 리포트입니다. 학부모 상담 자료로도 활용하실 수 있습니다.\n")
     add_intro_paragraphs(doc, report_text.replace("### 📈", "### 🔍"))
-    file_path = f"{student_name}_성장리포트.docx"
+    file_path = _out_path(f"{student_name}_성장리포트.docx")
     doc.save(file_path)
     return file_path
 
@@ -1603,10 +1773,21 @@ if "growth_report_file" not in st.session_state: st.session_state.growth_report_
 if "evaluation_sheet_file" not in st.session_state: st.session_state.evaluation_sheet_file = None
 if "last_save_info" not in st.session_state: st.session_state.last_save_info = None
 
+require_login()
+
 exam_db, exam_db_files = load_exam_db(APP_DIR)
 univ_info_db, univ_info_files = load_univ_info(APP_DIR)
 
 with st.sidebar:
+    _teacher = current_teacher()
+    if _teacher:
+        st.markdown(f"👤 **{_teacher}** 선생님" + (" · 관리자" if is_admin() else ""))
+        if st.button("로그아웃", use_container_width=True, key="logout_button"):
+            logout()
+        st.divider()
+    else:
+        st.warning("🔓 로그인이 설정되지 않았습니다. 주소를 아는 누구나 저장된 학생 기록을 볼 수 있습니다.")
+
     # Streamlit Cloud의 Secrets(GEMINI_API_KEY)에 키가 등록되어 있으면 자동으로 사용하고,
     # 없을 경우에만 직접 입력창을 보여줍니다.
     try:
@@ -1678,9 +1859,11 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
     if not saved_records:
         st.caption("아직 저장된 기록이 없습니다. 문항을 한 번 생성하면 이 학생의 문항·대화가 자동으로 저장됩니다.")
     else:
+        _show_owner = is_admin()
         record_options = {
-            f"{r['student_name']} · {r['university']}_{r['major']} — "
-            f"{r['updated_at'][:16].replace('T', ' ')}": r["id"]
+            (f"[{record_owner(r['id']) or '예전 기록'}] " if _show_owner else "")
+            + f"{r['student_name']} · {r['university']}_{r['major']} — "
+            + f"{str(r['updated_at'])[:16].replace('T', ' ')}": r["id"]
             for r in saved_records
         }
         selected_label = st.selectbox("불러올 기록을 선택하세요", list(record_options.keys()), key="record_select_box")
@@ -1771,7 +1954,7 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                                 st.success(f"'{target_name}' 학생의 성장 리포트가 생성되었습니다.")
                                 with open(report_path, "rb") as f:
                                     st.download_button(
-                                        "📈 성장 리포트 다운로드 (.docx)", f, file_name=report_path,
+                                        "📈 성장 리포트 다운로드 (.docx)", f, file_name=os.path.basename(report_path),
                                         use_container_width=True, key="dl_growth_report_inline"
                                     )
                                 st.markdown(report_text)
@@ -2096,7 +2279,7 @@ with st.expander("👥 여러 학생 한 번에 처리 (일괄 생성)", expande
                             except Exception:
                                 pass
 
-                            b_record_id = str(uuid.uuid4())
+                            b_record_id = new_record_id()
                             save_record(
                                 b_record_id, b_name, b_uni, b_major, "생기부 기반 면접", batch_difficulty,
                                 b_student_record, b_result,
@@ -2257,9 +2440,9 @@ if st.button("🚀 면접 패키지 생성 시작"):
             new_record_key = f"{student_name}|{uni}|{major}|{interview_type}"
             key_map = st.session_state.setdefault("record_key_map", {})
             if st.session_state.get("current_record_key") != new_record_key:
-                st.session_state.current_record_id = key_map.get(new_record_key) or str(uuid.uuid4())
+                st.session_state.current_record_id = key_map.get(new_record_key) or new_record_id()
             elif not st.session_state.get("current_record_id"):
-                st.session_state.current_record_id = str(uuid.uuid4())
+                st.session_state.current_record_id = new_record_id()
             st.session_state.current_record_key = new_record_key
             key_map[new_record_key] = st.session_state.current_record_id
             st.session_state.loaded_student_record_text = student_record
@@ -2375,11 +2558,15 @@ if st.session_state.chat_history:
         if st.session_state.get("growth_report_file"):
             downloadable.append(("📈 학생 성장 리포트 (.docx)", st.session_state.growth_report_file))
 
-        download_cols = st.columns(min(len(downloadable), 4))
+        downloadable = [(label, path) for label, path in downloadable if path and os.path.exists(path)]
+        download_cols = st.columns(max(min(len(downloadable), 4), 1))
         for i, (label, path) in enumerate(downloadable):
             with download_cols[i % len(download_cols)]:
                 with open(path, "rb") as f:
-                    st.download_button(label, f, file_name=path, use_container_width=True, key=f"dl_{i}_{path}")
+                    st.download_button(
+                        label, f, file_name=os.path.basename(path),
+                        use_container_width=True, key=f"dl_{i}_{os.path.basename(path)}"
+                    )
 
     # -------------------------------------------------------------------
     # 💾 저장 (자동 저장 + 수동 저장 버튼)
@@ -2390,7 +2577,7 @@ if st.session_state.chat_history:
     with save_col_new:
         if st.button("🆕 새 기록으로 저장", use_container_width=True, key="manual_save_new_btn",
                      help="같은 학생이라도 이번 연습을 '새로운 회차'로 따로 남기고 싶을 때 사용하세요. (성장 리포트용 회차가 쌓입니다)"):
-            st.session_state.current_record_id = str(uuid.uuid4())
+            st.session_state.current_record_id = new_record_id()
             _new_key = f"{student_name}|{uni}|{major}|{interview_type}"
             st.session_state.current_record_key = _new_key
             st.session_state.setdefault("record_key_map", {})[_new_key] = st.session_state.current_record_id
@@ -2444,10 +2631,11 @@ if st.session_state.chat_history:
             except Exception as e:
                 st.error(f"❌ 평가표 생성에 실패했습니다: {e}")
 
-        if st.session_state.get("evaluation_sheet_file"):
+        if st.session_state.get("evaluation_sheet_file") and os.path.exists(st.session_state.evaluation_sheet_file):
             with open(st.session_state.evaluation_sheet_file, "rb") as f:
                 st.download_button(
-                    "📥 평가표 다운로드 (.docx)", f, file_name=st.session_state.evaluation_sheet_file,
+                    "📥 평가표 다운로드 (.docx)", f,
+                    file_name=os.path.basename(st.session_state.evaluation_sheet_file),
                     use_container_width=True, key="dl_eval_sheet_inline"
                 )
 
