@@ -506,29 +506,46 @@ def list_db_universities(df):
 # 참고 예시로 쓰기에 정보가 적은 유형 (다른 것이 없을 때만 사용)
 _LOW_VALUE_QTYPES = {QTYPE_INTRO, QTYPE_ETC}
 
-def _diversify_examples(hits, top_n):
-    """일치도가 같은 후보 안에서는 질문 유형이 한쪽으로 쏠리지 않게 돌아가며 뽑습니다.
-    (예전에는 DB에 먼저 나오는 12건을 그대로 써서 '자기소개 해보세요' 같은 질문이 섞였습니다)"""
+def _diversify_examples(hits, top_n, type_share=None):
+    """일치도가 같은 후보 안에서 질문 유형과 출처 대학이 한쪽으로 쏠리지 않게 뽑습니다.
+    type_share(지원 대학의 실제 유형 비중)가 있으면, 그 비중에 가깝게 유형별 개수를 맞춥니다.
+    → 다른 대학의 같은 학과 기출을 가져올 때도 '지원 대학이 자주 묻는 유형' 위주로 선별됩니다."""
     picked = []
     for score in sorted(hits["_score"].unique()):
+        if len(picked) >= top_n:
+            break
         tier = hits[hits["_score"] == score]
         good = tier[~tier["_type"].isin(_LOW_VALUE_QTYPES) & (tier["질문"].str.len() >= 12) & ~tier["_follow"]]
         rest = tier.drop(index=good.index)
-        groups = sorted((g for _, g in good.groupby("_type", sort=False)), key=len, reverse=True)
-        queues = [list(g.index) for g in groups]
-        while any(queues) and len(picked) < top_n:
-            for q in queues:
-                if q and len(picked) < top_n:
-                    picked.append(q.pop(0))
+        queues = {}
+        for t, g in good.groupby("_type", sort=False):
+            # 한 대학의 질문만 연달아 뽑히지 않게, 대학별로 한 건씩 돌아가며 줄을 세웁니다.
+            g = g.assign(_r=g.groupby("_uk").cumcount()).sort_values("_r", kind="stable")
+            queues[t] = list(g.index)
+        total = sum(len(q) for q in queues.values())
+        room = top_n - len(picked)
+        weight = {}
+        for t, q in queues.items():
+            own = len(q) / total if total else 0
+            weight[t] = 0.6 * type_share.get(t, 0) + 0.4 * own if type_share else own
+        order = sorted(queues, key=lambda t: (-weight[t], -len(queues[t])))
+        wsum = sum(weight.values())
+        if type_share and wsum > 0:
+            for t in order:
+                k = min(int(round(weight[t] / wsum * room)), len(queues[t]), top_n - len(picked))
+                picked.extend(queues[t][:k])
+                queues[t] = queues[t][k:]
+        while any(queues.values()) and len(picked) < top_n:
+            for t in order:
+                if queues[t] and len(picked) < top_n:
+                    picked.append(queues[t].pop(0))
         for idx in rest.index:
             if len(picked) >= top_n:
                 break
             picked.append(idx)
-        if len(picked) >= top_n:
-            break
     return hits.loc[picked]
 
-def get_relevant_examples(df, major, uni_name, top_n=12):
+def get_relevant_examples(df, major, uni_name, top_n=12, type_share=None):
     """선택한 전공/대학과 가장 유사한 실제 기출 질의응답을 DB에서 골라옵니다.
 
     우선순위 (학과 적합성이 대학보다 우선 — 다른 대학의 같은 학과가
@@ -566,14 +583,11 @@ def get_relevant_examples(df, major, uni_name, top_n=12):
     hits = df[score < NO_MATCH].copy()
     hits["_score"] = score[hits.index]
     hits = hits.sort_values("_score", kind="stable").drop_duplicates(subset=["_uk", "학과", "질문"])
-    if not hits.empty:
-        return _diversify_examples(hits, top_n)
-
-    # 유사 학과가 하나도 없을 때: 최소한 '지원 대학의 다른 학과 기출'로 그 대학 화법이라도 반영합니다.
-    same_uni_any = df[same_uni & ~df["_type"].isin(_LOW_VALUE_QTYPES)]
-    if not same_uni_any.empty:
-        return same_uni_any.sample(min(top_n, len(same_uni_any)), random_state=42)
-    return df.sample(min(top_n, len(df)), random_state=42)
+    # 비슷한 학과가 전혀 없으면 빈 결과를 돌려줍니다. (예전에는 지원 대학의 아무 학과나 무작위로 채워
+    # '지원 학과 기출이 있다'고 잘못 안내되는 경우가 있었습니다. 대학 스타일은 A 자료가 따로 담당합니다.)
+    if hits.empty:
+        return hits
+    return _diversify_examples(hits, top_n, type_share=type_share)
 
 # -------------------------------------------------------------------------
 # [0-3] 대학·학과별 '실제 출제 분석'
@@ -1060,10 +1074,12 @@ def build_reference_strategy(exam_db, uni_name, major, top_n=12, style_n=8, incl
       + 지원 대학의 다른 학과 기출(스타일)을 결합 (mode='style_transfer')
     - 학과 기출 자체가 없으면 → 지원 대학 스타일 위주 (mode='uni_only')
     """
-    examples = get_relevant_examples(exam_db, major, uni_name, top_n=top_n)
-    has_same_dept_at_uni = bool(len(examples)) and any(
-        _uni_matches(uni_name, str(u)) for u in examples["대학"]
-    )
+    # 먼저 이 대학·학과의 실제 출제 비중을 구하고, 그 비중에 맞춰 참고 기출을 선별합니다.
+    profile = build_interview_profile(exam_db, uni_name, major)
+    type_share, _ = pick_allocation_basis(profile)
+    examples = get_relevant_examples(exam_db, major, uni_name, top_n=top_n, type_share=type_share or None)
+    # '지원 대학에 지원 학과 기출이 있다'는 판정은 학과가 일치(_score 0)할 때만 내립니다.
+    has_same_dept_at_uni = bool(len(examples)) and bool((examples["_score"] == 0).any())
     style = analyze_university_style(exam_db, uni_name)
     style_examples = get_university_style_examples(
         exam_db, uni_name, major, n=style_n,
@@ -1087,14 +1103,15 @@ def build_reference_strategy(exam_db, uni_name, major, top_n=12, style_n=8, incl
         )
     elif mode == "style_transfer":
         guide = (
-            f"\n[참고자료 사용 지침 — ⚠️ 중요]\n"
-            f"- DB에 **{uni_name} {major} 기출은 없습니다.** 그래서 두 가지를 결합해야 합니다.\n"
-            f"- ① A(대학 스타일): {uni_name}의 실제 출제 방식 — **어떤 말투·길이·유형으로 묻는지**를 그대로 따르세요. "
-            f"질문의 형식과 압박 수위는 A를 기준으로 합니다.\n"
-            f"- ② B(학과 전공): 다른 대학의 {major} 기출에서 **전공적합성과 학술적 깊이**를 가져오세요. "
-            f"어떤 개념을 어느 수준까지 파고드는지는 B를 기준으로 합니다.\n"
-            f"- 즉 **'{uni_name}의 말투로 묻는 {major} 전공 질문'**을 만들어야 합니다. "
-            f"A의 다른 학과 전공 내용은 절대 가져오지 마세요.\n"
+            f"\n[참고자료 사용 지침 — ⚠️ 중요: 타 대학 기출을 {uni_name} 스타일로 재구성]\n"
+            f"- DB에 **{uni_name} {major} 기출은 없습니다.** 그래서 아래 순서로 재구성해야 합니다.\n"
+            f"- ① 비교: A({uni_name}의 다른 학과 기출)를 서로 비교해, 이 대학이 **학과를 가리지 않고 공통으로 쓰는 "
+            f"질문 방식**(무엇을 먼저 묻는지, 말투와 길이, 꼬리질문을 어디까지 파고드는지)을 먼저 파악하세요.\n"
+            f"- ② 선별: B(다른 대학의 {major} 기출)에서 **{major} 지원자에게 실제로 묻는 전공 내용과 깊이**만 골라내세요. "
+            f"B는 {uni_name}이 자주 묻는 유형 위주로 이미 선별되어 있습니다. B에 ★ 표시된 것은 {uni_name}의 유사 학과 기출입니다.\n"
+            f"- ③ 재구성: ②의 내용을 ①의 방식으로 다시 쓰세요. 즉 **'{uni_name} 면접관이 {major} 지원자에게 물었을 법한 질문'**을 "
+            f"이 학생의 생기부 내용으로 만듭니다. B의 다른 대학 말투·형식은 따라 하지 마세요.\n"
+            f"- A의 다른 학과 전공 내용은 절대 가져오지 마세요. A에서는 '묻는 방식'만 가져옵니다.\n"
         )
     elif mode == "uni_only":
         guide = (
@@ -1110,7 +1127,6 @@ def build_reference_strategy(exam_db, uni_name, major, top_n=12, style_n=8, incl
     combined = guide + style_text + "\n" + dept_text
 
     # C: 이 대학·학과가 실제로 어떤 유형을 어떤 비중으로 물었는지 → 세트별 유형 배분 지시
-    profile = build_interview_profile(exam_db, uni_name, major)
     profile_text = format_profile_for_prompt(profile) if include_profile else ""
     if profile_text:
         combined += "\n" + profile_text
@@ -1129,7 +1145,102 @@ def build_reference_strategy(exam_db, uni_name, major, top_n=12, style_n=8, incl
 # -------------------------------------------------------------------------
 # [0-5] 출제 분석 화면 (대학·학과를 고르면 문항 생성 전에 바로 볼 수 있음)
 # -------------------------------------------------------------------------
-DB_UNI_REGION = "📚 기출 DB 대학 전체"
+ALL_UNI_REGION = "전체 대학 (기출 많은 순)"
+DIRECT_REGION = "직접 입력"
+MAJOR_OTHER = "이 대학 기출에 없는 학과 → 전국 학과 목록에서 선택"
+MAJOR_DIRECT = "학과 직접 입력"
+
+# 권역 구분. 교육대·교원대와 사관학교는 소재지와 상관없이 따로 묶습니다.
+UNI_REGION_ORDER = [
+    "서울권", "경기·인천권", "충청권", "경상권 (대구·경북)", "경상권 (부산·울산·경남)",
+    "강원·호남권", "교육대·교원대", "사관학교",
+]
+_REGION_MEMBERS = {
+    "서울권": "서울 동국 경희 건국 숭실 서울시립 한국외국어 국민 서울과학기술 광운 이화여자 명지 중앙 숙명여자 성신여자 "
+              "세종 서울여자 고려 연세 상명 삼육 홍익 동덕여자 성균관 덕성여자 서경 한양 장로회신학 강서 성공회 총신 "
+              "서강 백석예술",
+    "경기·인천권": "가천 아주 경기 가톨릭 단국 인하 한국항공 인천 을지 한국공학 수원 한양|ERICA 협성 신한 대진 차의과학 "
+                   "강남 안양 한세 평택 연성 한신",
+    "충청권": "공주 충남 충북 건국|글로컬 고려|세종 홍익|세종 순천향 우송 서원 한서 백석 한국기술교육 호서 단국|천안 청주 "
+              "한국교통 세명 한국전통문화 대전 상명|천안 중부 중원 남서울 건양 한밭 나사렛 선문 가톨릭꽃동네 목원 유원 "
+              "한국과학기술원",
+    "경상권 (대구·경북)": "경북 계명 대구가톨릭 대구 경운 경일 경국 대구한의 한동 동국|WISE 영남 위덕 김천 금오공과 "
+                          "포항공과 대구경북과학기술원 대구보건 동양 영남이공 구미 선린 계명문화 대경 대구과학",
+    "경상권 (부산·울산·경남)": "부산 동아 경상국립 울산 경성 창원 부산가톨릭 인제 신라 고신 경남 연암공과 "
+                               "울산과학기술원 부산외국어",
+    "강원·호남권": "강원 전남 전북 원광 한림 조선 광주과학기술원 한국에너지공과 연세|미래",
+}
+UNI_REGION_BY_KEY = {k: region for region, keys in _REGION_MEMBERS.items() for k in keys.split()}
+# 기출 DB에는 없지만 선택은 할 수 있어야 하는 대학 (다른 대학 기출로 재구성됩니다)
+EXTRA_UNIVERSITIES = {
+    "서울권": ["서강대학교"],
+    "충청권": ["충북대학교", "고려대학교(세종)"],
+    "교육대·교원대": ["경인교육대학교", "춘천교육대학교", "광주교육대학교"],
+}
+
+def region_of_university(name):
+    uk = uni_key(name)
+    base = uk.partition("|")[0]
+    known = UNI_REGION_BY_KEY.get(uk) or UNI_REGION_BY_KEY.get(base)
+    if known:
+        return known
+    if base.endswith("교육") or base == "한국교원":      # ○○교육대학교, 한국교원대학교
+        return "교육대·교원대"
+    if "사관학교" in base:
+        return "사관학교"
+    return "기타 대학"
+
+def build_region_universities(db_unis):
+    """{권역: [(대학 표시명, 기출 건수)]} — 권역 안에서는 기출이 많은 순."""
+    out = {}
+    seen = set()
+    for label, n in db_unis:
+        out.setdefault(region_of_university(label), []).append((label, n))
+        seen.add(uni_key(label))
+    for region, labels in EXTRA_UNIVERSITIES.items():
+        for label in labels:
+            if uni_key(label) not in seen:
+                out.setdefault(region, []).append((label, 0))
+    return {r: sorted(v, key=lambda x: (-x[1], x[0])) for r, v in out.items()}
+
+@st.cache_data(show_spinner=False)
+def cached_uni_departments(folder, uni_name):
+    """이 대학의 기출 보유 학과 [(학과, 건수)] — 건수가 많은 순."""
+    df, _ = load_exam_db(folder)
+    if df.empty or not uni_name:
+        return []
+    sub = df[_uni_mask(df, uni_key(uni_name))]
+    return [(d, int(c)) for d, c in sub["학과"].value_counts().items() if d]
+
+@st.cache_data(show_spinner=False)
+def cached_all_departments(folder):
+    """전국 학과 [(학과, 건수, 보유 대학 수)] — 건수가 많은 순."""
+    df, _ = load_exam_db(folder)
+    if df.empty:
+        return []
+    g = df[df["학과"] != ""].groupby("학과").agg(n=("질문", "size"), unis=("_uk", "nunique"))
+    g = g.sort_values(["n", "unis"], ascending=False)
+    return [(d, int(r.n), int(r.unis)) for d, r in g.iterrows()]
+
+@st.cache_data(show_spinner=False)
+def cached_reference_preview(folder, uni_name, major):
+    """문항 생성 때 실제로 쓰일 참고 방식(어느 대학·학과 기출을 어떻게 결합하는지)을 미리 계산합니다."""
+    df, _ = load_exam_db(folder)
+    stg = build_reference_strategy(df, uni_name, major, include_profile=False)
+    ex, sx = stg["examples"], stg["style_examples"]
+    same = _uni_mask(ex, uni_key(uni_name)) if len(ex) else pd.Series(dtype=bool)
+    sources = []
+    if len(ex):
+        other = ex[~same]
+        sources = [f"{u.split('(')[0]} {d}" for (u, d), _ in other.groupby(["대학", "학과"], sort=False)]
+    return {
+        "mode": stg["mode"],
+        "n_examples": int(len(ex)),
+        "n_same_uni": int(same.sum()) if len(ex) else 0,
+        "same_uni_depts": sorted(set(ex[same]["학과"])) if len(ex) else [],
+        "sources": list(dict.fromkeys(sources)),
+        "style_depts": list(dict.fromkeys(sx["학과"].tolist())) if sx is not None and len(sx) else [],
+    }
 
 @st.cache_data(show_spinner=False)
 def cached_db_universities(folder):
@@ -1150,7 +1261,7 @@ def _md_safe(text):
     """기출 원문을 화면에 그대로 보여줄 때 마크다운 기호가 서식으로 해석되지 않게 합니다."""
     return str(text or "").replace("~", "∼").replace("$", "＄").replace("*", "＊")
 
-def render_interview_profile(profile, uni_name, major, interview_type, real_cases=None):
+def render_interview_profile(profile, uni_name, major, interview_type, real_cases=None, preview=None):
     levels = (profile or {}).get("levels") or []
     primary = (profile or {}).get("primary")
     is_sangbu = "생기부" in interview_type
@@ -1163,6 +1274,40 @@ def render_interview_profile(profile, uni_name, major, interview_type, real_case
             "수험생이 복기한 면접 후기를 키워드 규칙으로 분류한 근사치입니다. "
             "건수가 적은 범위는 '경향'으로만 참고하세요."
         )
+        mode = (preview or {}).get("mode")
+        by_scope = {lv["scope"]: lv for lv in levels}
+        n_uni = (profile or {}).get("n_uni", 0)
+        nat = by_scope.get("전국 같은 학과")
+        if mode == "exact":
+            st.success(
+                f"✅ **{uni_name}에 {major} 기출이 있습니다.** 이 학과 기출 {by_scope['대학+학과']['n'] if '대학+학과' in by_scope else preview['n_same_uni']}건을 "
+                "기준으로 삼아 문항을 만듭니다."
+            )
+        elif mode == "style_transfer":
+            srcs = preview.get("sources") or []
+            st.warning(
+                f"🔀 **{uni_name}에는 {major} 기출이 없습니다.** 그래서 두 자료를 결합해 {uni_name} 스타일로 재구성합니다.\n\n"
+                f"- **질문 방식** ← {uni_name}의 다른 학과 기출 {n_uni:,}건을 비교 "
+                f"({', '.join(preview.get('style_depts', [])[:6]) or '다른 학과'} 등)\n"
+                f"- **전공 내용** ← 다른 대학의 {major} 기출"
+                + (f" {nat['n']:,}건 중 선별" if nat else " 중 선별")
+                + (f" ({', '.join(srcs[:6])}{' 등' if len(srcs) > 6 else ''})" if srcs else "")
+                + (f"\n- 참고: {uni_name}의 유사 학과({', '.join(preview['same_uni_depts'][:4])}) 기출도 함께 봅니다."
+                   if preview.get("same_uni_depts") else "")
+            )
+        elif mode == "uni_only":
+            st.warning(
+                f"🏫 **{major}와 비슷한 학과 기출이 전국 어디에도 없습니다.** {uni_name}의 다른 학과 기출 {n_uni:,}건에서 "
+                "질문 방식만 가져오고, 전공 내용은 고교 교육과정 연계 개념으로 직접 설계합니다."
+            )
+        elif mode == "dept_only":
+            st.warning(
+                f"📘 **{uni_name}의 기출이 DB에 없습니다.** 다른 대학의 {major} 기출을 기준으로 만듭니다. "
+                "이 대학만의 질문 방식은 반영되지 않습니다."
+            )
+        elif mode == "none":
+            st.warning("참고할 기출이 없어 생기부 내용과 전공 개념만으로 문항을 만듭니다.")
+
         if is_sangbu and primary and primary["jesimun_pct"] >= 40:
             st.warning(
                 f"⚠️ {primary['label']} 기출의 {primary['jesimun_pct']}%가 제시문·구술 문제입니다. "
@@ -2550,6 +2695,7 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                 if row:
                     st.session_state["region_select"] = "직접 입력"
                     st.session_state["uni_direct_input"] = row["university"]
+                    st.session_state["major_select"] = MAJOR_DIRECT
                     st.session_state["major_input"] = row["major"]
                     st.session_state["student_name_input"] = row["student_name"]
                     st.session_state["interview_type_radio"] = _rec_get(row, "interview_type", "생기부 기반 면접")
@@ -2661,31 +2807,64 @@ with st.expander("📖 [클릭] 프로그램 사용 설명서 및 PDF OCR 변환
     * ⚠️ 단, 이 저장 방식은 앱이 실행 중인 서버의 파일에 저장되는 방식입니다. 앱을 재배포(GitHub에 새로 커밋)하거나 서버가 완전히 재시작되면 저장된 기록이 초기화될 수 있으니, 중요한 학생 기록은 워드 파일로 다운로드해 별도 보관하시길 권장합니다.
     """.format(db_status=f"✅ {len(exam_db):,}건 로드 완료 ({exam_db['_uk'].nunique() if not exam_db.empty else 0}개 대학)" if not exam_db.empty else "⚠️ master_interview_qa.csv 파일을 찾지 못해 기본 학습 패턴만 사용 중입니다."))
 
-UNIVERSITIES = {
-    "서울권": ["서울대", "연세대", "고려대", "성균관대", "서강대", "한양대", "중앙대", "경희대", "한국외대", "서울시립대", "이화여대"],
-    "충청권": ["카이스트(KAIST)", "충남대", "충북대", "고려대(세종)"],
-    "경상권": ["경북대", "부산대", "UNIST", "영남대", "계명대"]
-}
+def _reset_if_invalid(key, options):
+    """선택지가 바뀌어 저장된 값이 더 이상 목록에 없으면 선택을 초기화합니다."""
+    if key in st.session_state and st.session_state[key] not in options:
+        del st.session_state[key]
 
 col1, col2 = st.columns(2)
 with col1:
     interview_type = st.radio("🎯 면접 방식", ["생기부 기반 면접", "상위권 대학 제시문 기반 면접"], horizontal=True, key="interview_type_radio")
     _db_unis = cached_db_universities(APP_DIR)
-    _db_uni_counts = dict(_db_unis)
-    _regions = ["서울권", "충청권", "경상권"] + ([DB_UNI_REGION] if _db_unis else []) + ["직접 입력"]
+    _region_unis = build_region_universities(_db_unis)
+    _regions = [r for r in UNI_REGION_ORDER if _region_unis.get(r)]
+    if _region_unis.get("기타 대학"):
+        _regions.append("기타 대학")
+    if _db_unis:
+        _region_unis[ALL_UNI_REGION] = _db_unis
+        _regions.append(ALL_UNI_REGION)
+    _regions.append(DIRECT_REGION)
+    _reset_if_invalid("region_select", _regions)
     region = st.selectbox("📍 권역 선택", _regions, key="region_select")
-    if region == "직접 입력":
+    if region == DIRECT_REGION:
         uni = st.text_input("🏫 대학 직접 입력", value="한국대", key="uni_direct_input")
-    elif region == DB_UNI_REGION:
-        # 기출이 있는 대학 전체를 건수가 많은 순으로 보여줍니다.
-        uni = st.selectbox(
-            "🏫 대학 선택 (기출 많은 순)", [u for u, _ in _db_unis],
-            format_func=lambda u: f"{u} · 기출 {_db_uni_counts.get(u, 0):,}건", key="uni_db_select",
-        )
     else:
-        uni = st.selectbox("🏫 대학 선택", UNIVERSITIES[region], key="uni_select")
+        _uni_list = _region_unis[region]
+        _uni_counts = dict(_uni_list)
+        _uni_options = [u for u, _ in _uni_list]
+        _reset_if_invalid("uni_select", _uni_options)
+        uni = st.selectbox(
+            f"🏫 대학 선택 ({len(_uni_options)}개 · 기출 많은 순)", _uni_options,
+            format_func=lambda u: f"{u} · 기출 {_uni_counts.get(u, 0):,}건" if _uni_counts.get(u, 0) else f"{u} · 기출 없음(타 대학 기출로 재구성)",
+            key="uni_select",
+        )
 with col2:
-    major = st.text_input("🎓 지원 학과/전공", placeholder="예: 철학과", key="major_input")
+    # 🎓 학과: 이 대학에 기출이 있는 학과를 먼저 보여주고, 없으면 전국 학과 목록이나 직접 입력으로 고릅니다.
+    _depts = cached_uni_departments(APP_DIR, uni)
+    _dept_counts = dict(_depts)
+    _major_options = [d for d, _ in _depts] + [MAJOR_OTHER, MAJOR_DIRECT]
+    _reset_if_invalid("major_select", _major_options)
+    _major_choice = st.selectbox(
+        f"🎓 지원 학과 선택 (이 대학 기출 보유 {len(_depts)}개 학과)" if _depts else "🎓 지원 학과 선택 (이 대학은 기출 보유 학과가 없습니다)",
+        _major_options,
+        format_func=lambda d: f"{d} · 기출 {_dept_counts[d]}건" if d in _dept_counts else d,
+        key="major_select",
+    )
+    if _major_choice == MAJOR_DIRECT:
+        major = st.text_input("🎓 학과 직접 입력", placeholder="예: 철학과", key="major_input")
+    elif _major_choice == MAJOR_OTHER:
+        _all_depts = [x for x in cached_all_departments(APP_DIR) if x[0] not in _dept_counts]
+        _all_info = {d: (n, k) for d, n, k in _all_depts}
+        _other_options = [d for d, _, _ in _all_depts]
+        _reset_if_invalid("major_other_select", _other_options)
+        major = st.selectbox(
+            f"🔎 전국 학과 목록 ({len(_other_options)}개 · 기출 많은 순, 글자를 입력해 검색)", _other_options,
+            format_func=lambda d: f"{d} · {_all_info[d][1]}개 대학 {_all_info[d][0]}건",
+            key="major_other_select",
+        ) if _other_options else ""
+    else:
+        major = _major_choice
+    major = str(major or "").strip()
     student_name = st.text_input("👤 지원자 성명", value="김기섭", key="student_name_input")
     difficulty = st.radio("⚙️ 난이도 선택", ["하 (기초)", "중 (표준)", "상 (압박)"], horizontal=True, index=1, key="difficulty_radio")
 
@@ -2723,7 +2902,10 @@ if _info_row is not None:
 # 📊 선택한 대학·학과가 실제로 무엇을 어떤 비중으로 물었는지 (기출 DB 직접 집계)
 if str(major or "").strip() and not exam_db.empty:
     _preview_cases = cached_real_cases(APP_DIR, uni, major) if "제시문" in interview_type else None
-    render_interview_profile(cached_interview_profile(APP_DIR, uni, major), uni, major, interview_type, _preview_cases)
+    render_interview_profile(
+        cached_interview_profile(APP_DIR, uni, major), uni, major, interview_type,
+        _preview_cases, cached_reference_preview(APP_DIR, uni, major),
+    )
 
 st.markdown("---")
 
