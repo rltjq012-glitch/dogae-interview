@@ -2865,7 +2865,7 @@ with col2:
     else:
         major = _major_choice
     major = str(major or "").strip()
-    student_name = st.text_input("👤 지원자 성명", value="김기섭", key="student_name_input")
+    student_name = st.text_input("👤 지원자 성명", placeholder="예: 홍길동", key="student_name_input").strip()
     difficulty = st.radio("⚙️ 난이도 선택", ["하 (기초)", "중 (표준)", "상 (압박)"], horizontal=True, index=1, key="difficulty_radio")
 
 uploaded_file = None
@@ -3179,6 +3179,7 @@ with st.expander("👥 여러 학생 한 번에 처리 (일괄 생성)", expande
 if st.button("🚀 면접 패키지 생성 시작"):
     if not api_key: st.error("API 키를 입력해 주세요."); st.stop()
     if not major: st.error("지원 학과를 입력해 주세요."); st.stop()
+    if not student_name: st.error("지원자 성명을 입력해 주세요. (문서 이름과 저장 기록을 학생별로 구분하는 데 쓰입니다)"); st.stop()
     if interview_type == "생기부 기반 면접" and not uploaded_file and not st.session_state.get("loaded_student_record_text"):
         st.error("생기부 파일을 업로드하거나, 위에서 저장된 기록을 먼저 불러와 주세요.")
         st.stop()
