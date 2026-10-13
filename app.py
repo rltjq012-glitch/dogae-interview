@@ -2249,11 +2249,77 @@ SANGBU_AREAS = [
     ("교과 세특", r"세\s*부\s*능\s*력\s*및\s*특\s*기\s*사\s*항|세특"),
     ("자율활동", r"자\s*율\s*활\s*동|자율"),
     ("동아리활동", r"동\s*아\s*리\s*활\s*동|동아리"),
-    ("봉사활동", r"봉\s*사\s*활\s*동|봉사"),
     ("진로활동", r"진\s*로\s*활\s*동|진로"),
     ("행동특성 및 종합의견", r"행\s*동\s*특\s*성|종\s*합\s*의\s*견|행특"),
     ("독서활동", r"독\s*서\s*활\s*동|독서"),
 ]
+# -------------------------------------------------------------------------
+# 형광펜·쉬운 해설에 쓸 생기부 본문만 남기기
+#   면접 준비에 쓸모가 적고 분량만 차지하는 부분을 뺍니다.
+#   - 인적·학적사항, 출결, 수상경력, 자격증, 학교폭력 조치상황, 봉사활동(실적표 포함)
+#   - 교과학습발달상황의 성적표 (세부능력 및 특기사항은 남김)
+#   - 쪽마다 찍히는 출력 머리글(학교명/출력시각/IP/교사명), 학생 인적사항 줄
+#   ※ 면접 문항 생성에는 원문 전체를 그대로 씁니다(성적 추이 같은 약점 분석에 필요).
+# -------------------------------------------------------------------------
+_TOP_SECTION_RX = re.compile(
+    r"^\s*(\d{1,2})\s*[.．]\s*(인\s*적|학\s*적|출\s*결|수\s*상|자\s*격\s*증|학\s*교\s*폭\s*력|"
+    r"창\s*의\s*적|교\s*과\s*학\s*습|독\s*서|행\s*동\s*특\s*성)"
+)
+_KEEP_TOP = ("창의적", "독서", "행동특성")        # 통째로 남기는 영역
+_GRADES_TOP = "교과학습"                          # 성적표는 빼고 세특만 남기는 영역
+_PRINT_NOISE_RX = [
+    # 출력 머리글: 도개고등학교/2026.08.31 15:54/10.51.***.69/김기섭 / 2
+    re.compile(r"[가-힣A-Za-z]+(?:고등학교|학교)\s*/\s*\d{4}\.\d{1,2}\.\d{1,2}\s+\d{1,2}:\d{2}\s*/\s*[\d.*]+\s*/\s*[^/]{1,20}/\s*\d+"),
+    # 쪽 위 학생 정보: 도개고등학교 2026년 8월 31일 23 반 2 번호 6 성명 홍길동
+    re.compile(r"[가-힣A-Za-z]+(?:고등학교|학교)\s+\d{4}년\s*\d{1,2}월\s*\d{1,2}일\s+(?:\d+\s*)?반\s*\d+\s*번호\s*\d+\s*성명\s*\S+"),
+]
+_SETEUK_RX = re.compile(r"세\s*부\s*능\s*력\s*및\s*특\s*기\s*사\s*항|개\s*인\s*별\s*세\s*부")
+_GRADE_TABLE_RX = re.compile(r"단\s*위\s*수|원\s*점\s*수|석\s*차\s*등\s*급|성\s*취\s*도\s*\(|과\s*목\s*평\s*균|수\s*강\s*자\s*수|이\s*수\s*단\s*위")
+_VOLUNTEER_RX = re.compile(r"^\s*봉\s*사\s*활\s*동")
+_CHANGCHE_SUB_RX = re.compile(r"^\s*(?:\d\s+)?(?:자\s*율|동\s*아\s*리|진\s*로)")
+
+def trim_record_for_review(text):
+    """생기부 원문에서 면접 준비에 필요한 서술형 본문만 남깁니다.
+    NEIS 형식의 영역 번호(1. 인적·학적사항 … 9. 행동특성 및 종합의견)를 찾지 못하면 원문을 그대로 돌려줍니다."""
+    raw = str(text or "")
+    lines = raw.splitlines()
+    if not any(_TOP_SECTION_RX.match(ln) for ln in lines):
+        cleaned = raw
+        for rx in _PRINT_NOISE_RX:
+            cleaned = rx.sub(" ", cleaned)
+        return cleaned
+    out, keep, section, in_volunteer = [], True, "", False
+    for ln in lines:
+        for rx in _PRINT_NOISE_RX:
+            ln = rx.sub(" ", ln)
+        if not ln.strip():
+            continue
+        m = _TOP_SECTION_RX.match(ln)
+        if m:
+            section = re.sub(r"\s+", "", m.group(2))
+            in_volunteer = False
+            keep = section.startswith(_KEEP_TOP)
+            if section.startswith(_GRADES_TOP):
+                keep = False          # 성적표부터 시작 → 세특 머리를 만나면 다시 남김
+            if keep:
+                out.append(ln)
+            continue
+        if section.startswith(_GRADES_TOP):
+            if _SETEUK_RX.search(ln):
+                keep = True
+            elif _GRADE_TABLE_RX.search(ln):
+                keep = False
+        elif section.startswith("창의적"):
+            if _VOLUNTEER_RX.match(ln):
+                in_volunteer = True
+            elif in_volunteer and _CHANGCHE_SUB_RX.match(ln):
+                in_volunteer = False
+            if in_volunteer:
+                continue
+        if keep:
+            out.append(ln)
+    return "\n".join(out)
+
 # 지원 대학이 자주 묻는 유형 → 생기부에서 먼저 칠해야 할 곳
 _TYPE_AREA_HINT = {
     "서류 활동 확인형": "교과 세특·동아리의 탐구 과정과 결과",
@@ -2280,7 +2346,7 @@ def build_explain_and_highlight_prompt(student_record_text, questions, priority_
     """'생기부 쉬운 해설'과 '형광펜 구절'을 한 번의 호출로 요청합니다."""
     flat_qs = [re.sub(r"\s+", " ", str(q))[:160] for q in questions if q]
     q_lines = "\n".join("- " + q for q in flat_qs) or "- (없음)"
-    return build_easy_explanation_prompt(student_record_text) + f"""
+    return build_easy_explanation_prompt(trim_record_for_review(student_record_text)) + f"""
 
     [추가 작업: 형광펜 표시 — 해설을 모두 쓴 뒤에 이어서 작성]
     해설 맨 끝에 '{HL_MARKER}' 한 줄을 쓰고, 그 아래에 형광펜으로 칠할 구절을 한 줄에 하나씩 JSON으로 쓰세요.
@@ -2291,7 +2357,7 @@ def build_explain_and_highlight_prompt(student_record_text, questions, priority_
        - 확정: 아래 [이미 만든 면접 질문]이 다룬 내용의 핵심 구절 (최대 {HL_LEVELS['확정']['max']}개)
        - 예상: 아직 질문하지 않았지만 면접관이 짚을 가능성이 높은 구절. 전공 개념어, 이론·법칙명, 책 제목, 실험·탐구 방법과 수치, '주도', '심화', '확장' 같은 표현 (최대 {HL_LEVELS['예상']['max']}개, 가능성 높은 순)
        - 방어: 공격받을 수 있는 구절. 과장된 표현('완벽히', '깊이 이해' 등), 근거가 약한 결론, 활동 사이 연결이 약한 부분, 성적과 맞지 않는 주장 (최대 {HL_LEVELS['방어']['max']}개)
-    3. "영역"은 다음 중 하나: 교과 세특(과목명 포함, 예: 교과 세특-생명과학Ⅰ) / 자율활동 / 동아리활동 / 봉사활동 / 진로활동 / 행동특성 및 종합의견 / 독서활동
+    3. "영역"은 다음 중 하나: 교과 세특(과목명 포함, 예: 교과 세특-생명과학Ⅰ) / 자율활동 / 동아리활동 / 진로활동 / 행동특성 및 종합의견 / 독서활동
     4. "질문"은 그 구절로 면접관이 던질 질문 한 문장, "준비"는 학생이 미리 정리할 것 한 문장, "이유"는 이 구절을 칠한 이유 한 문장입니다.
     5. 우선순위: {priority_text}
     6. 생기부의 여러 영역에 고르게 칠하되, 근거 없이 개수를 채우지 마세요.
@@ -2358,7 +2424,7 @@ def _canonical_area(area):
 
 def build_highlight_data(student_record_text, raw_items):
     """형광펜 항목을 원문 위치에 맞춰 정리하고, 영역별 빈틈을 계산합니다."""
-    text = _layout_record_text(student_record_text)
+    text = _layout_record_text(trim_record_for_review(student_record_text))
     norm = text.replace("\n", " ")
     nospace_chars, ns_map = [], []
     for idx, ch in enumerate(norm):
