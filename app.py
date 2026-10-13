@@ -2493,6 +2493,53 @@ def _set_col_widths(table, widths_cm):
         for cell, w in zip(row.cells, widths_cm):
             cell.width = Cm(w)                 # 칸(tcW) 너비
 
+_RATE_LIMIT_RX = re.compile(r"429|RESOURCE_EXHAUSTED|quota|rate", re.I)
+
+def run_explain_and_highlight(student_record, result_text, profile, uni_name, student_name, target_desc, api_key):
+    """'생기부 쉬운 해설'과 '형광펜 생기부'를 만들어 세션에 넣습니다.
+    실패해도 화면을 다시 그리면 사라지지 않도록 이유를 st.session_state.highlight_error에 남깁니다."""
+    st.session_state.highlight_data = None
+    st.session_state.highlight_files = None
+    st.session_state.highlight_error = ""
+    prompt = build_explain_and_highlight_prompt(
+        student_record,
+        [qa["q"] for qa in extract_qa_pairs(result_text)],
+        highlight_priority_text(profile, uni_name),
+    )
+    try:
+        try:
+            raw = call_gemini(prompt, api_key)
+        except Exception as e:
+            # 무료 등급은 분당 사용량 한도가 낮아, 문항 생성 직후 바로 부르면 막힐 수 있습니다 → 잠시 쉬고 한 번 더
+            if not _RATE_LIMIT_RX.search(str(e)):
+                raise
+            time.sleep(25)
+            raw = call_gemini(prompt, api_key)
+        easy_explanation, hl_items = split_explanation_and_highlights(raw)
+        st.session_state.easy_explanation_text = easy_explanation
+        st.session_state.easy_explanation_file = create_easy_explanation_word(easy_explanation, student_name, target_desc)
+        if not hl_items:
+            st.session_state.highlight_error = "AI 응답에 형광펜 목록이 빠져 있었습니다."
+            return False
+        hl = build_highlight_data(student_record, hl_items)
+        if not hl["items"]:
+            st.session_state.highlight_error = (
+                f"AI가 고른 구절 {len(hl_items)}개가 모두 원문과 글자가 달라 칠하지 못했습니다."
+            )
+            return False
+        st.session_state.highlight_data = hl
+        st.session_state.highlight_files = (
+            create_highlight_word(hl, student_name, target_desc, is_teacher=False),
+            create_highlight_word(hl, student_name, target_desc, is_teacher=True),
+        )
+        return True
+    except Exception as e:
+        msg = str(e)
+        if _RATE_LIMIT_RX.search(msg):
+            msg = "Gemini 사용량 한도에 걸렸습니다(무료 등급은 분당 한도가 낮습니다). 1~2분 뒤 다시 시도해 주세요. — " + msg[:200]
+        st.session_state.highlight_error = msg
+        return False
+
 def _marker(no):
     return _CIRCLED[no - 1] if 1 <= no <= len(_CIRCLED) else f"({no})"
 
@@ -2958,6 +3005,7 @@ if "easy_explanation_text" not in st.session_state: st.session_state.easy_explan
 if "easy_explanation_file" not in st.session_state: st.session_state.easy_explanation_file = None
 if "highlight_data" not in st.session_state: st.session_state.highlight_data = None
 if "highlight_files" not in st.session_state: st.session_state.highlight_files = None
+if "highlight_error" not in st.session_state: st.session_state.highlight_error = ""
 if "summary_card_file" not in st.session_state: st.session_state.summary_card_file = None
 if "growth_report_file" not in st.session_state: st.session_state.growth_report_file = None
 if "evaluation_sheet_file" not in st.session_state: st.session_state.evaluation_sheet_file = None
@@ -3085,6 +3133,7 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                     st.session_state["easy_explanation_file"] = None
                     st.session_state["highlight_data"] = None
                     st.session_state["highlight_files"] = None
+                    st.session_state["highlight_error"] = "저장된 기록을 불러오면 형광펜·쉬운 해설은 비어 있습니다(저장하지 않는 항목)."
                     st.session_state["summary_card_file"] = None
                     st.session_state["growth_report_file"] = None
                     st.session_state["evaluation_sheet_file"] = None
@@ -3653,38 +3702,17 @@ if st.button("🚀 면접 패키지 생성 시작"):
             st.session_state.word_files = (stu_path, tea_path)
 
             # 📚 생기부 기반 면접일 때는 '생기부 쉬운 해설'과 '🖍️ 형광펜 생기부'를 한 번의 호출로 함께 생성
-            st.session_state.highlight_data = None
-            st.session_state.highlight_files = None
             if interview_type == "생기부 기반 면접" and student_record.strip():
-                try:
-                    with st.spinner("📚 생기부 해설과 🖍️ 형광펜 표시를 만드는 중입니다..."):
-                        hl_prompt = build_explain_and_highlight_prompt(
-                            student_record,
-                            [qa["q"] for qa in extract_qa_pairs(result_text)],
-                            highlight_priority_text(strategy.get("profile"), uni),
-                        )
-                        easy_explanation, hl_items = split_explanation_and_highlights(call_gemini(hl_prompt, api_key))
-                    st.session_state.easy_explanation_text = easy_explanation
-                    st.session_state.easy_explanation_file = create_easy_explanation_word(
-                        easy_explanation, student_name, target_desc
+                with st.spinner("📚 생기부 해설과 🖍️ 형광펜 표시를 만드는 중입니다..."):
+                    run_explain_and_highlight(
+                        student_record, result_text, strategy.get("profile"), uni, student_name, target_desc, api_key
                     )
-                    if hl_items:
-                        hl = build_highlight_data(student_record, hl_items)
-                        if hl["items"]:
-                            st.session_state.highlight_data = hl
-                            st.session_state.highlight_files = (
-                                create_highlight_word(hl, student_name, target_desc, is_teacher=False),
-                                create_highlight_word(hl, student_name, target_desc, is_teacher=True),
-                            )
-                    if not st.session_state.highlight_files:
-                        st.info("ℹ️ 이번에는 형광펜 표시를 만들지 못했습니다. 다시 생성하면 나올 수 있습니다.")
-                except Exception as e:
-                    st.session_state.easy_explanation_text = ""
-                    st.session_state.easy_explanation_file = None
-                    st.warning(f"⚠️ 생기부 쉬운 해설·형광펜 생성에 실패했습니다: {e}")
             else:
                 st.session_state.easy_explanation_text = ""
                 st.session_state.easy_explanation_file = None
+                st.session_state.highlight_data = None
+                st.session_state.highlight_files = None
+                st.session_state.highlight_error = ""
 
             # 🗂️ 면접 직전에 훑어볼 A4 한 장 요약카드 (별도 AI 호출 없이 방금 생성된 문항에서 바로 추출)
             try:
@@ -3895,6 +3923,26 @@ if st.session_state.chat_history:
         render_save_status()
 
     _hl = st.session_state.get("highlight_data")
+    if interview_type == "생기부 기반 면접" and not (_hl and _hl.get("items")):
+        with st.container(border=True):
+            st.markdown("**🖍️ 형광펜 생기부가 아직 없습니다**")
+            if st.session_state.get("highlight_error"):
+                st.caption(f"이유: {st.session_state.highlight_error}")
+            _has_record = bool(st.session_state.get("loaded_student_record_text", "").strip()) or bool(uploaded_file)
+            if not _has_record:
+                st.caption("생기부 원문이 없습니다. 위에서 생기부 PDF를 다시 올린 뒤 아래 버튼을 눌러 주세요.")
+            if st.button("🖍️ 형광펜·쉬운 해설 다시 만들기", disabled=not _has_record or not api_key,
+                         use_container_width=True, key="rerun_highlight"):
+                _rec = st.session_state.get("loaded_student_record_text", "")
+                if uploaded_file and not _rec.strip():
+                    _rec = extract_text_from_pdf(uploaded_file)
+                    st.session_state.loaded_student_record_text = _rec
+                with st.spinner("📚 생기부 해설과 🖍️ 형광펜 표시를 만드는 중입니다... (30초~1분)"):
+                    run_explain_and_highlight(
+                        _rec, st.session_state.get("last_result_text", ""),
+                        cached_interview_profile(APP_DIR, uni, major), uni, student_name, target_desc, api_key,
+                    )
+                st.rerun()
     if _hl and _hl.get("items"):
         _c = _hl["count"]
         _gap_n = sum(1 for g in _hl["gaps"] if g["상태"].startswith("⚠️"))
