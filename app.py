@@ -1527,6 +1527,27 @@ def _out_path(filename):
 # -------------------------------------------------------------------------
 SHEET_CELL_LIMIT = 45000  # 구글시트 셀 상한(5만 자)보다 여유 있게
 
+def load_saved_history(value):
+    """저장된 대화 내역 칸을 (대화 목록, 부가자료 dict)로 읽습니다. 예전 형식(목록만)도 그대로 읽힙니다."""
+    data = load_json_safe(value, [])
+    if isinstance(data, dict):
+        hist = data.get("history") if isinstance(data.get("history"), list) else []
+        extras = data.get("extras") if isinstance(data.get("extras"), dict) else {}
+        return hist, extras
+    return (data if isinstance(data, list) else []), {}
+
+def history_for_save(chat_history=None):
+    """저장할 때 대화 내역과 함께 형광펜 목록·쉬운 해설을 묶습니다."""
+    if chat_history is None:
+        chat_history = st.session_state.get("chat_history", [])
+    return {
+        "history": list(chat_history or []),
+        "extras": {
+            "highlight_items": st.session_state.get("highlight_raw_items") or [],
+            "easy_explanation": st.session_state.get("easy_explanation_text") or "",
+        },
+    }
+
 def load_json_safe(value, default=None):
     """어떤 값이 와도 예외를 던지지 않는 json.loads."""
     if default is None:
@@ -1552,9 +1573,34 @@ def load_json_safe(value, default=None):
         pass
     return default
 
+def _fit_history(history, limit):
+    history = list(history or [])
+    text = json.dumps(history, ensure_ascii=False)
+    while len(text) > limit and len(history) > 1:
+        history = history[1:]
+        text = json.dumps(history, ensure_ascii=False)
+    return history if len(text) <= limit else []
+
 def dump_chat_history(chat_history, limit=SHEET_CELL_LIMIT):
     """대화 내역을 JSON 문자열로 만들되, 구글시트 셀 상한을 넘지 않게
-    오래된 메시지부터 잘라냅니다. (중간에서 잘린 JSON은 다시 못 읽기 때문)"""
+    오래된 메시지부터 잘라냅니다. (중간에서 잘린 JSON은 다시 못 읽기 때문)
+    chat_history가 {"history": [...], "extras": {...}} 이면 형광펜·쉬운 해설도 같은 칸에 함께 저장합니다.
+    칸이 모자라면 쉬운 해설 → 오래된 대화 → 형광펜 순서로 덜어냅니다."""
+    if isinstance(chat_history, dict):
+        history = list(chat_history.get("history") or [])
+        extras = {k: v for k, v in (chat_history.get("extras") or {}).items() if v}
+        if extras:
+            def pack(h, ex):
+                return json.dumps({"v": 2, "history": h, "extras": ex}, ensure_ascii=False)
+            text = pack(history, extras)
+            if len(text) <= limit:
+                return text
+            extras.pop("easy_explanation", None)
+            if extras:
+                room = limit - len(pack([], extras))
+                if room > 2:
+                    return pack(_fit_history(history, room), extras)
+        chat_history = history
     history = list(chat_history or [])
     text = json.dumps(history, ensure_ascii=False)
     while len(text) > limit and len(history) > 1:
@@ -1868,7 +1914,7 @@ def save_current_session(student_name, university, major, interview_type, diffic
         st.session_state.current_record_id, student_name, university, major, interview_type, difficulty,
         st.session_state.get("loaded_student_record_text", ""),
         st.session_state.get("last_result_text", ""),
-        st.session_state.get("chat_history", []),
+        history_for_save(),
         quiet=quiet,
     )
 
@@ -2500,6 +2546,7 @@ def run_explain_and_highlight(student_record, result_text, profile, uni_name, st
     실패해도 화면을 다시 그리면 사라지지 않도록 이유를 st.session_state.highlight_error에 남깁니다."""
     st.session_state.highlight_data = None
     st.session_state.highlight_files = None
+    st.session_state.highlight_raw_items = []
     st.session_state.highlight_error = ""
     prompt = build_explain_and_highlight_prompt(
         student_record,
@@ -2528,6 +2575,7 @@ def run_explain_and_highlight(student_record, result_text, profile, uni_name, st
             )
             return False
         st.session_state.highlight_data = hl
+        st.session_state.highlight_raw_items = hl_items
         st.session_state.highlight_files = (
             create_highlight_word(hl, student_name, target_desc, is_teacher=False),
             create_highlight_word(hl, student_name, target_desc, is_teacher=True),
@@ -3006,6 +3054,7 @@ if "easy_explanation_file" not in st.session_state: st.session_state.easy_explan
 if "highlight_data" not in st.session_state: st.session_state.highlight_data = None
 if "highlight_files" not in st.session_state: st.session_state.highlight_files = None
 if "highlight_error" not in st.session_state: st.session_state.highlight_error = ""
+if "highlight_raw_items" not in st.session_state: st.session_state.highlight_raw_items = []
 if "summary_card_file" not in st.session_state: st.session_state.summary_card_file = None
 if "growth_report_file" not in st.session_state: st.session_state.growth_report_file = None
 if "evaluation_sheet_file" not in st.session_state: st.session_state.evaluation_sheet_file = None
@@ -3119,7 +3168,8 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                     st.session_state["difficulty_radio"] = _rec_get(row, "difficulty", "중 (표준)")
                     st.session_state["loaded_student_record_text"] = _rec_get(row, "student_record_text", "")
                     st.session_state["last_result_text"] = row["result_text"] or ""
-                    st.session_state["chat_history"] = load_json_safe(_rec_get(row, "chat_history", ""), [])
+                    _hist, _extras = load_saved_history(_rec_get(row, "chat_history", ""))
+                    st.session_state["chat_history"] = _hist
                     st.session_state["current_record_id"] = row["id"]
                     _loaded_key = (
                         f"{row['student_name']}|{row['university']}|{row['major']}|"
@@ -3133,7 +3183,35 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                     st.session_state["easy_explanation_file"] = None
                     st.session_state["highlight_data"] = None
                     st.session_state["highlight_files"] = None
-                    st.session_state["highlight_error"] = "저장된 기록을 불러오면 형광펜·쉬운 해설은 비어 있습니다(저장하지 않는 항목)."
+                    st.session_state["highlight_raw_items"] = []
+                    st.session_state["highlight_error"] = (
+                        "이 기록에는 형광펜이 저장되어 있지 않습니다(형광펜 저장 기능을 넣기 전에 만든 기록). 아래 버튼으로 다시 만들어 주세요."
+                    )
+                    # 저장된 형광펜 목록·쉬운 해설을 복원 (AI를 다시 부르지 않음)
+                    _ld_name = row["student_name"]
+                    _ld_desc = f"{row['university']}_{row['major']}"
+                    _ld_rec = st.session_state["loaded_student_record_text"]
+                    _easy = str(_extras.get("easy_explanation") or "")
+                    if _easy.strip():
+                        st.session_state["easy_explanation_text"] = _easy
+                        try:
+                            st.session_state["easy_explanation_file"] = create_easy_explanation_word(_easy, _ld_name, _ld_desc)
+                        except Exception:
+                            pass
+                    _items = [it for it in (_extras.get("highlight_items") or []) if isinstance(it, dict)]
+                    if _items and _ld_rec.strip():
+                        try:
+                            _hl_loaded = build_highlight_data(_ld_rec, _items)
+                            if _hl_loaded["items"]:
+                                st.session_state["highlight_data"] = _hl_loaded
+                                st.session_state["highlight_raw_items"] = _items
+                                st.session_state["highlight_error"] = ""
+                                st.session_state["highlight_files"] = (
+                                    create_highlight_word(_hl_loaded, _ld_name, _ld_desc, is_teacher=False),
+                                    create_highlight_word(_hl_loaded, _ld_name, _ld_desc, is_teacher=True),
+                                )
+                        except Exception as e:
+                            st.session_state["highlight_error"] = f"저장된 형광펜을 복원하지 못했습니다: {e}"
                     st.session_state["summary_card_file"] = None
                     st.session_state["growth_report_file"] = None
                     st.session_state["evaluation_sheet_file"] = None
@@ -3182,7 +3260,7 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                                 full = get_record(r["id"])
                                 if not full:
                                     continue
-                                chat_hist = load_json_safe(_rec_get(full, "chat_history", ""), [])
+                                chat_hist, _ = load_saved_history(_rec_get(full, "chat_history", ""))
                                 sessions.append({
                                     "updated_at": full["updated_at"],
                                     "university": full["university"],
@@ -3712,6 +3790,7 @@ if st.button("🚀 면접 패키지 생성 시작"):
                 st.session_state.easy_explanation_file = None
                 st.session_state.highlight_data = None
                 st.session_state.highlight_files = None
+                st.session_state.highlight_raw_items = []
                 st.session_state.highlight_error = ""
 
             # 🗂️ 면접 직전에 훑어볼 A4 한 장 요약카드 (별도 AI 호출 없이 방금 생성된 문항에서 바로 추출)
@@ -3757,7 +3836,7 @@ if st.button("🚀 면접 패키지 생성 시작"):
             st.session_state.loaded_student_record_text = student_record
             save_info = save_record(
                 st.session_state.current_record_id, student_name, uni, major, interview_type, difficulty,
-                student_record, result_text, st.session_state.chat_history
+                student_record, result_text, history_for_save()
             )
 
             if save_info.get("ok") and "구글시트" in save_info.get("where", ""):
@@ -3938,10 +4017,12 @@ if st.session_state.chat_history:
                     _rec = extract_text_from_pdf(uploaded_file)
                     st.session_state.loaded_student_record_text = _rec
                 with st.spinner("📚 생기부 해설과 🖍️ 형광펜 표시를 만드는 중입니다... (30초~1분)"):
-                    run_explain_and_highlight(
+                    if run_explain_and_highlight(
                         _rec, st.session_state.get("last_result_text", ""),
                         cached_interview_profile(APP_DIR, uni, major), uni, student_name, target_desc, api_key,
-                    )
+                    ):
+                        # 다시 만든 형광펜도 기록에 남겨, 다음에 불러올 때 그대로 나오게 합니다.
+                        save_current_session(student_name, uni, major, interview_type, difficulty, quiet=True)
                 st.rerun()
     if _hl and _hl.get("items"):
         _c = _hl["count"]
