@@ -1977,7 +1977,7 @@ def extract_text_from_pdf(uploaded_file):
                 )
     return full_text
 
-def call_gemini(prompt, api_key):
+def call_gemini(prompt, api_key, json_mode=False):
     if isinstance(prompt, bytes):
         prompt = prompt.decode('utf-8', errors='ignore')
     elif not isinstance(prompt, str):
@@ -1999,7 +1999,13 @@ def call_gemini(prompt, api_key):
     last_error = ""
     for target_model in models_to_try[:3]:
         try:
-            response = client.models.generate_content(model=target_model, contents=prompt)
+            if json_mode:
+                response = client.models.generate_content(
+                    model=target_model, contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json"),
+                )
+            else:
+                response = client.models.generate_content(model=target_model, contents=prompt)
             return response.text
         except Exception as e:
             last_error = str(e)
@@ -2412,24 +2418,62 @@ def build_explain_and_highlight_prompt(student_record_text, questions, priority_
     {q_lines}
     """
 
+def _extract_hl_objects(text):
+    """글 속의 JSON 객체·배열을 모두 찾아 '구절' 키가 있는 항목만 돌려줍니다.
+    AI가 한 줄에 하나씩 쓰지 않고 여러 줄로 펼치거나 [ ... ] 배열·```json 블록으로 감싸도 읽습니다."""
+    dec = json.JSONDecoder()
+    items, i, text = [], 0, str(text or "")
+    while i < len(text):
+        if text[i] not in "{[":
+            i += 1
+            continue
+        try:
+            obj, end = dec.raw_decode(text, i)
+        except Exception:
+            i += 1
+            continue
+        objs = obj if isinstance(obj, list) else [obj]
+        if isinstance(obj, dict) and isinstance(obj.get("items"), list):
+            objs = obj["items"]
+        for o in objs:
+            if isinstance(o, dict) and str(o.get("구절", "")).strip():
+                items.append(o)
+        i = end
+    return items
+
 def split_explanation_and_highlights(raw):
     """AI 응답을 (쉬운 해설, 형광펜 항목 목록)으로 나눕니다. 형광펜 부분이 없으면 빈 목록."""
     text = str(raw or "")
-    if HL_MARKER not in text:
-        return text.strip(), []
-    explanation, _, tail = text.partition(HL_MARKER)
-    items = []
-    for line in tail.splitlines():
-        line = line.strip().strip("`").strip().rstrip(",")
-        if not line.startswith("{"):
-            continue
-        try:
-            obj = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(obj, dict):
-            items.append(obj)
-    return explanation.strip(), items
+    if HL_MARKER in text:
+        explanation, _, tail = text.partition(HL_MARKER)
+    else:
+        # 표시줄을 빠뜨린 경우: 첫 형광펜 JSON이 시작되는 곳부터를 목록으로 봅니다.
+        m = re.search(r'(?:```(?:json)?\s*)?\[?\s*\{\s*"구절"', text)
+        if not m:
+            return text.strip(), []
+        explanation, tail = text[:m.start()], text[m.start():]
+    explanation = re.sub(r"[*#`\s]+$", "", explanation.strip())
+    return explanation.strip(), _extract_hl_objects(tail)
+
+def build_highlight_only_prompt(student_record_text, questions, priority_text):
+    """합친 호출에서 형광펜 목록이 안 나왔을 때 쓰는 '형광펜만' 요청(JSON 응답 모드)."""
+    flat_qs = [re.sub(r"\s+", " ", str(q))[:160] for q in questions if q]
+    q_lines = "\n".join("- " + q for q in flat_qs) or "- (없음)"
+    return f"""당신은 학생부종합전형 면접 전문가입니다. 아래 [생기부 원문]에서 면접 대비용 형광펜을 칠할 구절을 고르세요.
+JSON 배열 하나만 출력하세요. 각 원소는 {{"구절": "...", "색": "확정|예상|방어", "영역": "...", "질문": "...", "준비": "...", "이유": "..."}} 입니다.
+규칙:
+1. "구절"은 원문에서 글자 그대로 복사한 8~60자 문장 일부입니다. 단어·띄어쓰기를 바꾸지 마세요.
+2. 확정: [이미 만든 면접 질문]이 다룬 핵심 구절(최대 {HL_LEVELS['확정']['max']}개) / 예상: 아직 안 물었지만 나올 가능성 높은 구절 — 전공 개념어, 책 제목, 탐구 방법·수치, '주도'·'심화' 같은 표현(최대 {HL_LEVELS['예상']['max']}개) / 방어: 과장되거나 근거가 약해 공격받을 구절(최대 {HL_LEVELS['방어']['max']}개)
+3. "영역": 교과 세특(과목명 포함, 예: 교과 세특-생명과학Ⅰ) / 자율활동 / 동아리활동 / 진로활동 / 행동특성 및 종합의견 / 독서활동
+4. "질문"·"준비"·"이유"는 각각 한 문장.
+5. 우선순위: {priority_text}
+
+[이미 만든 면접 질문]
+{q_lines}
+
+[생기부 원문]
+{trim_record_for_review(student_record_text)}
+"""
 
 def _layout_record_text(student_record_text):
     """원문을 읽기 좋은 문단으로 정리합니다. 글자 위치가 바뀌지 않도록 줄바꿈 한 글자를
@@ -2448,17 +2492,28 @@ def _layout_record_text(student_record_text):
         out.append(("\n" if new_para else " ") + ln)
     return "".join(out)
 
+_HL_SKIP_RX = re.compile(r"[\s\W_]", re.UNICODE)
+
 def _locate_quote(norm, nospace, ns_map, quote):
     q = re.sub(r"\s+", " ", str(quote or "")).strip().strip("\"'“”‘’「」『』")
+    q = re.sub(r"(?:\.\.\.|…)+$", "", q).strip()
     if len(q) < 4:
         return None
     i = norm.find(q)
     if i >= 0:
         return i, i + len(q)
-    qn = re.sub(r"\s+", "", q)          # PDF에서 '그 래프'처럼 띄어쓰기가 깨진 경우
+    # 띄어쓰기·문장부호를 모두 뺀 글자끼리 비교 (PDF에서 '그 래프', '·'/'∙', 따옴표 모양이 달라진 경우)
+    qn = _HL_SKIP_RX.sub("", q)
+    if len(qn) < 4:
+        return None
     j = nospace.find(qn)
-    if j >= 0 and qn:
+    if j >= 0:
         return ns_map[j], ns_map[j + len(qn) - 1] + 1
+    # AI가 구절 끝을 살짝 바꾼 경우: 앞에서부터 가장 길게 맞는 부분(10자 이상)만 칠함
+    for cut in range(len(qn) - 1, 9, -1):
+        j = nospace.find(qn[:cut])
+        if j >= 0:
+            return ns_map[j], ns_map[j + cut - 1] + 1
     return None
 
 def _canonical_area(area):
@@ -2474,7 +2529,7 @@ def build_highlight_data(student_record_text, raw_items):
     norm = text.replace("\n", " ")
     nospace_chars, ns_map = [], []
     for idx, ch in enumerate(norm):
-        if not ch.isspace():
+        if not _HL_SKIP_RX.match(ch):
             nospace_chars.append(ch)
             ns_map.append(idx)
     nospace = "".join(nospace_chars)
@@ -2565,15 +2620,39 @@ def run_explain_and_highlight(student_record, result_text, profile, uni_name, st
         easy_explanation, hl_items = split_explanation_and_highlights(raw)
         st.session_state.easy_explanation_text = easy_explanation
         st.session_state.easy_explanation_file = create_easy_explanation_word(easy_explanation, student_name, target_desc)
-        if not hl_items:
-            st.session_state.highlight_error = "AI 응답에 형광펜 목록이 빠져 있었습니다."
-            return False
-        hl = build_highlight_data(student_record, hl_items)
-        if not hl["items"]:
-            st.session_state.highlight_error = (
-                f"AI가 고른 구절 {len(hl_items)}개가 모두 원문과 글자가 달라 칠하지 못했습니다."
+        hl = build_highlight_data(student_record, hl_items) if hl_items else None
+        first_note = (
+            "해설 응답에 형광펜 목록이 없었습니다" if not hl_items
+            else f"해설 응답의 구절 {len(hl_items)}개가 원문과 맞지 않았습니다"
+        )
+        if not (hl and hl["items"]):
+            # 해설이 길면 AI가 형광펜 부분을 빼먹는 일이 잦아, 형광펜만 JSON으로 따로 한 번 더 받습니다.
+            only_prompt = build_highlight_only_prompt(
+                student_record, [qa["q"] for qa in extract_qa_pairs(result_text)],
+                highlight_priority_text(profile, uni_name),
             )
-            return False
+            try:
+                raw2 = call_gemini(only_prompt, api_key, json_mode=True)
+            except Exception as e:
+                if not _RATE_LIMIT_RX.search(str(e)):
+                    raise
+                time.sleep(25)
+                raw2 = call_gemini(only_prompt, api_key, json_mode=True)
+            hl_items = _extract_hl_objects(raw2)
+            if not hl_items:
+                head = re.sub(r"\s+", " ", str(raw2))[:120]
+                st.session_state.highlight_error = (
+                    f"{first_note}. 형광펜만 다시 요청했지만 목록을 읽지 못했습니다. "
+                    f"(AI 응답 앞부분: {head})"
+                )
+                return False
+            hl = build_highlight_data(student_record, hl_items)
+            if not hl["items"]:
+                st.session_state.highlight_error = (
+                    f"{first_note}. 다시 요청한 구절 {len(hl_items)}개도 모두 원문과 글자가 달라 칠하지 못했습니다. "
+                    f"(예: {str(hl_items[0].get('구절', ''))[:40]})"
+                )
+                return False
         st.session_state.highlight_data = hl
         st.session_state.highlight_raw_items = hl_items
         st.session_state.highlight_files = (
