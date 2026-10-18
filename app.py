@@ -1536,6 +1536,13 @@ def load_saved_history(value):
         return hist, extras
     return (data if isinstance(data, list) else []), {}
 
+def _current_card_checks():
+    """지금 화면의 질문에 대한 자가 체크만 저장합니다(지난 질문의 체크는 버림)."""
+    hl = st.session_state.get("highlight_data") or {}
+    keys = set(hl.get("q_keys") or [])
+    return {k: v for k, v in (st.session_state.get("card_checks") or {}).items()
+            if k in keys and v and v != "미확인"}
+
 def history_for_save(chat_history=None):
     """저장할 때 대화 내역과 함께 형광펜 목록·쉬운 해설을 묶습니다."""
     if chat_history is None:
@@ -1545,6 +1552,7 @@ def history_for_save(chat_history=None):
         "extras": {
             "highlight_items": st.session_state.get("highlight_raw_items") or [],
             "easy_explanation": st.session_state.get("easy_explanation_text") or "",
+            "card_checks": _current_card_checks(),
         },
     }
 
@@ -2288,13 +2296,16 @@ def create_easy_explanation_word(explanation_text, student_name, target_desc):
 #   비용을 늘리지 않으려고 '생기부 쉬운 해설' 호출에 함께 요청합니다.
 # -------------------------------------------------------------------------
 HL_MARKER = "===형광펜==="
-HL_LEVELS = {
-    "확정": {"label": "이미 문항에서 다룬 부분", "fill": "FFF59D", "css": "#fff59d", "icon": "🟨", "max": 8},
-    "예상": {"label": "아직 안 물었지만 나올 가능성 높음", "fill": "FFCC80", "css": "#ffcc80", "icon": "🟧", "max": 12},
-    "방어": {"label": "공격받을 수 있는 부분", "fill": "B3E5FC", "css": "#b3e5fc", "icon": "🟦", "max": 5},
+HL_COMPS = {
+    "학업": {"label": "학업역량", "fill": "FFF59D", "css": "#fff59d", "icon": "🟨"},
+    "진로": {"label": "진로역량", "fill": "BBDEFB", "css": "#bbdefb", "icon": "🟦"},
+    "공동체": {"label": "공동체역량", "fill": "C8E6C9", "css": "#c8e6c9", "icon": "🟩"},
 }
-HL_PRIORITY = ["예상", "방어", "확정"]   # 칠한 구간이 겹치면 이 순서로 우선합니다.
+HL_DEFEND = {"label": "압박 대비", "icon": "〰️", "css": "#d32f2f", "hex": "D32F2F"}
+HL_Q_TYPES = ["확인", "심화", "연결", "압박"]
+HL_MAX_CARDS = 20            # 칠하는 문장 수 상한 (번호 ①~⑳)
 _CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+_CHECK_OPTS = ["미확인", "자신 있음", "애매", "모름"]
 
 # 생기부 영역 (빈틈 표시용). 원문에 이 영역이 있는지 + 형광펜이 몇 개 닿았는지를 셉니다.
 SANGBU_AREAS = [
@@ -2392,37 +2403,94 @@ def highlight_priority_text(profile, uni_name):
     top = sorted(share.items(), key=lambda kv: -kv[1])[:3]
     mix = ", ".join(f"{t} {int(round(p * 100))}%" for t, p in top)
     order = " → ".join(_TYPE_AREA_HINT.get(t, t) for t, _ in top)
-    return f"{uni_name}은(는) 실제로 {mix} 순으로 많이 묻습니다(기준: {basis}). 그러므로 '예상' 구절은 {order} 순서로 우선 고르세요."
+    return f"{uni_name}은(는) 실제로 {mix} 순으로 많이 묻습니다(기준: {basis}). 그러므로 문장은 {order} 순서로 우선 고르세요."
+
+def _hl_card_rules(priority_text, with_count=True, with_keywords=True):
+    """질문 카드(문장 → 역량 → 질문 → 답변 가이드) 형식과 규칙."""
+    rules = f"""형식: {{"구절": "...", "역량": "학업|진로|공동체", "방어": true|false, "영역": "...", "이유": "...", "질문": [{{"질문": "...", "유형": "확인|심화|연결|압박", "난이도": "기본|심화", "가이드": "...", "기존": true|false}}]}}
+    규칙:
+    1. "구절"은 생기부 원문에서 **글자 그대로 복사**한 10~70자 문장 일부입니다. 단어를 바꾸거나, 줄이거나, 띄어쓰기를 고치지 마세요. 면접관이 짚을 만한 문장(탐구 과정과 결과, 전공 개념어, 책 제목, 수치, 맡은 역할, 진로 변화)을 고르세요.
+    2. "역량": 그 문장이 드러내는 학종 평가역량 하나 — 학업(학업 태도·탐구력·전공 개념) / 진로(진로 탐색·전공 관심·진로 연계 활동) / 공동체(협업·리더십·배려·소통)
+    3. "방어": 과장된 표현('완벽히', '깊이 이해' 등), 근거가 약한 결론, 앞뒤 연결이 약한 활동처럼 면접관이 공격할 만한 문장이면 true. true이면 질문 하나는 유형 "압박"으로 쓰세요.
+    4. "영역": 교과 세특(과목명 포함, 예: 교과 세특-생명과학Ⅰ) / 자율활동 / 동아리활동 / 진로활동 / 행동특성 및 종합의견 / 독서활동
+    5. "질문": 그 문장을 근거로 면접관이 실제로 던질 질문 1~2개. "~했다고 했는데"처럼 그 문장을 짚는 말로 시작하세요. [이미 만든 면접 질문] 중 이 문장에서 나온 질문이 있으면 그 질문을 글자 그대로 먼저 넣고 "기존": true로 표시하세요.
+       - "유형": 확인(사실·동기·역할) / 심화(개념·원리·한계) / 연결(다른 활동·진로와 잇기) / 압박(약점 공격)
+       - "가이드": 답변에 꼭 들어갈 내용 1~2문장(무엇을 어떤 순서로 말할지). 모범답안 전문은 쓰지 마세요.
+    6. "이유": 이 문장을 고른 이유 한 문장.
+    7. 우선순위: {priority_text}"""
+    if with_count:
+        rules += f"""
+    8. 문장은 {HL_MAX_CARDS - 6}~{HL_MAX_CARDS - 2}개를 생기부의 여러 영역에서 고르게 고르세요. 교과 세특을 꼼꼼히 보되, 근거 없이 개수를 채우지 마세요."""
+    if with_keywords:
+        rules += """
+    9. 맨 마지막 줄에 이 학생 면접의 핵심 키워드 5~8개를 {"키워드": ["...", "..."]} 형식으로 쓰세요."""
+    return rules
+
+def _q_lines(questions):
+    flat_qs = [re.sub(r"\s+", " ", str(q))[:160] for q in questions if q]
+    return "\n".join("- " + q for q in flat_qs) or "- (없음)"
 
 def build_explain_and_highlight_prompt(student_record_text, questions, priority_text):
-    """'생기부 쉬운 해설'과 '형광펜 구절'을 한 번의 호출로 요청합니다."""
-    flat_qs = [re.sub(r"\s+", " ", str(q))[:160] for q in questions if q]
-    q_lines = "\n".join("- " + q for q in flat_qs) or "- (없음)"
+    """'생기부 쉬운 해설'과 '질문 카드'를 한 번의 호출로 요청합니다."""
     return build_easy_explanation_prompt(trim_record_for_review(student_record_text)) + f"""
 
-    [추가 작업: 형광펜 표시 — 해설을 모두 쓴 뒤에 이어서 작성]
-    해설 맨 끝에 '{HL_MARKER}' 한 줄을 쓰고, 그 아래에 형광펜으로 칠할 구절을 한 줄에 하나씩 JSON으로 쓰세요.
-    형식: {{"구절": "...", "색": "확정|예상|방어", "영역": "...", "질문": "...", "준비": "...", "이유": "..."}}
-    규칙:
-    1. "구절"은 위 생기부 원문에서 **글자 그대로 복사**하세요. 단어를 바꾸거나, 줄이거나, 띄어쓰기를 고치지 마세요. 8~60자 길이의 문장 일부로 고르세요.
-    2. 색 기준
-       - 확정: 아래 [이미 만든 면접 질문]이 다룬 내용의 핵심 구절 (최대 {HL_LEVELS['확정']['max']}개)
-       - 예상: 아직 질문하지 않았지만 면접관이 짚을 가능성이 높은 구절. 전공 개념어, 이론·법칙명, 책 제목, 실험·탐구 방법과 수치, '주도', '심화', '확장' 같은 표현 (최대 {HL_LEVELS['예상']['max']}개, 가능성 높은 순)
-       - 방어: 공격받을 수 있는 구절. 과장된 표현('완벽히', '깊이 이해' 등), 근거가 약한 결론, 활동 사이 연결이 약한 부분, 성적과 맞지 않는 주장 (최대 {HL_LEVELS['방어']['max']}개)
-    3. "영역"은 다음 중 하나: 교과 세특(과목명 포함, 예: 교과 세특-생명과학Ⅰ) / 자율활동 / 동아리활동 / 진로활동 / 행동특성 및 종합의견 / 독서활동
-    4. "질문"은 그 구절로 면접관이 던질 질문 한 문장, "준비"는 학생이 미리 정리할 것 한 문장, "이유"는 이 구절을 칠한 이유 한 문장입니다.
-    5. 우선순위: {priority_text}
-    6. 생기부의 여러 영역에 고르게 칠하되, 근거 없이 개수를 채우지 마세요.
+    [추가 작업: 형광펜 질문 카드 — 해설을 모두 쓴 뒤에 이어서 작성]
+    해설 맨 끝에 '{HL_MARKER}' 한 줄을 쓰고, 그 아래에 칠할 문장을 한 줄에 하나씩 JSON으로 쓰세요.
+    {_hl_card_rules(priority_text)}
 
     [이미 만든 면접 질문]
-    {q_lines}
+    {_q_lines(questions)}
     """
 
-def _extract_hl_objects(text):
-    """글 속의 JSON 객체·배열을 모두 찾아 '구절' 키가 있는 항목만 돌려줍니다.
-    AI가 한 줄에 하나씩 쓰지 않고 여러 줄로 펼치거나 [ ... ] 배열·```json 블록으로 감싸도 읽습니다."""
+def build_highlight_only_prompt(student_record_text, questions, priority_text):
+    """합친 호출에서 카드가 안 나왔을 때 쓰는 '카드만' 요청(JSON 응답 모드)."""
+    return f"""당신은 학생부종합전형 면접 전문가입니다. 아래 [생기부 원문]에서 면접관이 짚을 문장을 골라 질문 카드를 만드세요.
+    JSON 하나만 출력하세요: {{"items": [카드, ...], "키워드": ["...", "..."]}} ("키워드"는 이 학생 면접의 핵심 키워드 5~8개)
+    카드 {_hl_card_rules(priority_text, with_keywords=False)}
+
+    [이미 만든 면접 질문]
+    {_q_lines(questions)}
+
+    [생기부 원문]
+    {trim_record_for_review(student_record_text)}
+    """
+
+def build_gap_cards_prompt(student_record_text, areas, taken_quotes, priority_text):
+    """질문이 하나도 없는 영역에만 카드를 더 만듭니다."""
+    taken = "\n".join("- " + q for q in taken_quotes) or "- (없음)"
+    return f"""당신은 학생부종합전형 면접 전문가입니다. 아래 [생기부 원문]에서 다음 영역은 아직 면접 질문이 하나도 없습니다: {", ".join(areas)}.
+    각 영역에서 면접관이 짚을 만한 문장을 1~2개씩 골라 질문 카드를 만드세요. [이미 고른 문장]은 다시 고르지 마세요.
+    JSON 하나만 출력하세요: {{"items": [카드, ...]}}
+    카드 {_hl_card_rules(priority_text, with_count=False, with_keywords=False)}
+
+    [이미 고른 문장]
+    {taken}
+
+    [생기부 원문]
+    {trim_record_for_review(student_record_text)}
+    """
+
+def build_more_questions_prompt(card, para_text, uni_name, major, priority_text):
+    """한 문장에서만 새 질문 2개를 만듭니다(생기부 전체를 보내지 않아 비용이 적습니다)."""
+    existing = "\n".join("- " + q["q"] for q in card["qs"]) or "- (없음)"
+    return f"""당신은 {uni_name} {major} 학생부종합전형 면접관입니다. 아래 [근거 문장]만을 근거로 새 면접 질문 2개를 만드세요.
+    [이미 있는 질문]과 겹치지 않게, 하나는 더 깊이 파고드는 질문(심화 또는 연결), 하나는 다른 각도의 질문으로 만드세요.
+    JSON 하나만 출력하세요: {{"질문": [{{"질문": "...", "유형": "확인|심화|연결|압박", "난이도": "기본|심화", "가이드": "..."}}]}}
+    - 질문은 "~했다고 했는데"처럼 근거 문장을 짚는 말로 시작합니다.
+    - "가이드"는 답변에 꼭 들어갈 내용 1~2문장입니다. 모범답안 전문은 쓰지 마세요.
+    - 참고: {priority_text}
+
+    [근거 문장] {card["quote"]}
+    [문장이 들어 있는 문단] {para_text}
+    [이미 있는 질문]
+    {existing}
+    """
+
+def _extract_json_objects(text):
+    """글 속의 JSON 객체·배열을 모두 찾아 dict 목록으로 돌려줍니다.
+    한 줄에 하나씩 쓰지 않고 여러 줄로 펼치거나 [ ... ] 배열·```json 블록·{"items": [...]}로 감싸도 읽습니다."""
     dec = json.JSONDecoder()
-    items, i, text = [], 0, str(text or "")
+    out, i, text = [], 0, str(text or "")
     while i < len(text):
         if text[i] not in "{[":
             i += 1
@@ -2433,47 +2501,36 @@ def _extract_hl_objects(text):
             i += 1
             continue
         objs = obj if isinstance(obj, list) else [obj]
-        if isinstance(obj, dict) and isinstance(obj.get("items"), list):
-            objs = obj["items"]
         for o in objs:
-            if isinstance(o, dict) and str(o.get("구절", "")).strip():
-                items.append(o)
+            if not isinstance(o, dict):
+                continue
+            if isinstance(o.get("items"), list):
+                out.extend(x for x in o["items"] if isinstance(x, dict))
+                if o.get("키워드"):
+                    out.append({"키워드": o["키워드"]})
+            else:
+                out.append(o)
         i = end
-    return items
+    return out
+
+def _extract_hl_objects(text):
+    """카드(구절이 있는 항목)와 키워드 항목만 남깁니다."""
+    return [o for o in _extract_json_objects(text)
+            if str(o.get("구절", "")).strip() or (o.get("키워드") and "구절" not in o)]
 
 def split_explanation_and_highlights(raw):
-    """AI 응답을 (쉬운 해설, 형광펜 항목 목록)으로 나눕니다. 형광펜 부분이 없으면 빈 목록."""
+    """AI 응답을 (쉬운 해설, 카드·키워드 항목 목록)으로 나눕니다. 카드 부분이 없으면 빈 목록."""
     text = str(raw or "")
     if HL_MARKER in text:
         explanation, _, tail = text.partition(HL_MARKER)
     else:
-        # 표시줄을 빠뜨린 경우: 첫 형광펜 JSON이 시작되는 곳부터를 목록으로 봅니다.
+        # 표시줄을 빠뜨린 경우: 첫 카드 JSON이 시작되는 곳부터를 목록으로 봅니다.
         m = re.search(r'(?:```(?:json)?\s*)?\[?\s*\{\s*"구절"', text)
         if not m:
             return text.strip(), []
         explanation, tail = text[:m.start()], text[m.start():]
     explanation = re.sub(r"[*#`\s]+$", "", explanation.strip())
     return explanation.strip(), _extract_hl_objects(tail)
-
-def build_highlight_only_prompt(student_record_text, questions, priority_text):
-    """합친 호출에서 형광펜 목록이 안 나왔을 때 쓰는 '형광펜만' 요청(JSON 응답 모드)."""
-    flat_qs = [re.sub(r"\s+", " ", str(q))[:160] for q in questions if q]
-    q_lines = "\n".join("- " + q for q in flat_qs) or "- (없음)"
-    return f"""당신은 학생부종합전형 면접 전문가입니다. 아래 [생기부 원문]에서 면접 대비용 형광펜을 칠할 구절을 고르세요.
-JSON 배열 하나만 출력하세요. 각 원소는 {{"구절": "...", "색": "확정|예상|방어", "영역": "...", "질문": "...", "준비": "...", "이유": "..."}} 입니다.
-규칙:
-1. "구절"은 원문에서 글자 그대로 복사한 8~60자 문장 일부입니다. 단어·띄어쓰기를 바꾸지 마세요.
-2. 확정: [이미 만든 면접 질문]이 다룬 핵심 구절(최대 {HL_LEVELS['확정']['max']}개) / 예상: 아직 안 물었지만 나올 가능성 높은 구절 — 전공 개념어, 책 제목, 탐구 방법·수치, '주도'·'심화' 같은 표현(최대 {HL_LEVELS['예상']['max']}개) / 방어: 과장되거나 근거가 약해 공격받을 구절(최대 {HL_LEVELS['방어']['max']}개)
-3. "영역": 교과 세특(과목명 포함, 예: 교과 세특-생명과학Ⅰ) / 자율활동 / 동아리활동 / 진로활동 / 행동특성 및 종합의견 / 독서활동
-4. "질문"·"준비"·"이유"는 각각 한 문장.
-5. 우선순위: {priority_text}
-
-[이미 만든 면접 질문]
-{q_lines}
-
-[생기부 원문]
-{trim_record_for_review(student_record_text)}
-"""
 
 def _layout_record_text(student_record_text):
     """원문을 읽기 좋은 문단으로 정리합니다. 글자 위치가 바뀌지 않도록 줄바꿈 한 글자를
@@ -2523,8 +2580,65 @@ def _canonical_area(area):
             return name
     return "기타"
 
+def _guess_comp(area):
+    a = str(area or "")
+    if "진로" in a:
+        return "진로"
+    if re.search(r"자율|동아리|봉사|행동|종합|행특", a):
+        return "공동체"
+    return "학업"
+
+def _norm_comp(value, area=""):
+    v = str(value or "")
+    for k in HL_COMPS:
+        if k in v:
+            return k
+    return _guess_comp(area)
+
+def _is_true(value):
+    return value is True or str(value).strip().lower() in ("true", "1", "y", "yes", "예", "o")
+
+def _qkey(question):
+    import hashlib
+    return hashlib.md5(str(question).encode("utf-8")).hexdigest()[:12]
+
+def _norm_questions(it):
+    """카드의 질문 목록을 정리합니다. 예전 형식(질문 한 문장 + 준비)도 읽습니다."""
+    raw = it.get("질문")
+    if isinstance(raw, str):
+        raw = [{"질문": raw, "가이드": it.get("준비", "")}]
+    out, seen = [], set()
+    for q in raw or []:
+        if isinstance(q, str):
+            q = {"질문": q}
+        if not isinstance(q, dict):
+            continue
+        text = re.sub(r"\s+", " ", str(q.get("질문", ""))).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        typ = str(q.get("유형", ""))
+        out.append({
+            "q": text,
+            "type": next((t for t in HL_Q_TYPES if t in typ), "확인"),
+            "level": "심화" if "심화" in str(q.get("난이도", "")) else "기본",
+            "guide": str(q.get("가이드", "") or q.get("준비", "")).strip(),
+            "existing": _is_true(q.get("기존")),
+        })
+    return out
+
+_PARA_AREA_RX = [
+    ("교과 세특", re.compile(r"세\s*부\s*능\s*력\s*및\s*특\s*기\s*사\s*항")),
+    ("자율활동", re.compile(r"자\s*율\s*활\s*동")),
+    ("동아리활동", re.compile(r"동\s*아\s*리\s*활\s*동")),
+    ("진로활동", re.compile(r"진\s*로\s*활\s*동")),
+    ("행동특성 및 종합의견", re.compile(r"행\s*동\s*특\s*성")),
+    ("독서활동", re.compile(r"독\s*서\s*활\s*동")),
+]
+
 def build_highlight_data(student_record_text, raw_items):
-    """형광펜 항목을 원문 위치에 맞춰 정리하고, 영역별 빈틈을 계산합니다."""
+    """질문 카드를 원문 위치에 맞춰 정리하고, 문단·영역별 빈틈을 계산합니다.
+    raw_items는 AI가 낸 카드 목록(+키워드 항목)이며, 저장·질문 추가도 이 목록을 기준으로 합니다."""
     text = _layout_record_text(trim_record_for_review(student_record_text))
     norm = text.replace("\n", " ")
     nospace_chars, ns_map = [], []
@@ -2534,54 +2648,87 @@ def build_highlight_data(student_record_text, raw_items):
             ns_map.append(idx)
     nospace = "".join(nospace_chars)
 
-    cleaned, dropped = [], 0
-    for it in raw_items:
-        level = str(it.get("색", "")).strip()
-        level = next((k for k in HL_LEVELS if k in level), None)
-        span = _locate_quote(norm, nospace, ns_map, it.get("구절", "")) if level else None
-        if not span:
+    keywords, cleaned, dropped = [], [], 0
+    for idx, it in enumerate(raw_items or []):
+        if not isinstance(it, dict):
+            continue
+        if it.get("키워드") and "구절" not in it:
+            kw = it["키워드"]
+            for k in (kw if isinstance(kw, list) else re.split(r"[,·/]", str(kw))):
+                k = str(k).strip().strip("#")
+                if k and k not in keywords:
+                    keywords.append(k)
+            continue
+        span = _locate_quote(norm, nospace, ns_map, it.get("구절", ""))
+        qs = _norm_questions(it)
+        if not span or not qs:
             dropped += 1
             continue
+        area = str(it.get("영역", "")).strip() or "기타"
+        defend = _is_true(it.get("방어")) or "방어" in str(it.get("색", ""))
         cleaned.append({
-            "level": level, "start": span[0], "end": span[1], "quote": norm[span[0]:span[1]],
-            "area": str(it.get("영역", "")).strip() or "기타", "area_key": _canonical_area(it.get("영역", "")),
-            "question": str(it.get("질문", "")).strip(), "prep": str(it.get("준비", "")).strip(),
-            "reason": str(it.get("이유", "")).strip(),
+            "raw_idx": idx, "start": span[0], "end": span[1], "quote": norm[span[0]:span[1]],
+            "comp": _norm_comp(it.get("역량"), area), "defend": defend,
+            "area": area, "area_key": _canonical_area(area),
+            "reason": str(it.get("이유", "")).strip(), "qs": qs,
         })
 
-    # 색별 개수 상한 + 겹치는 구간 정리 (예상 > 방어 > 확정 순으로 우선)
-    accepted, count = [], {k: 0 for k in HL_LEVELS}
-    for level in HL_PRIORITY:
-        for it in [c for c in cleaned if c["level"] == level]:
-            if count[level] >= HL_LEVELS[level]["max"]:
-                dropped += 1
-                continue
-            if any(not (it["end"] <= a["start"] or it["start"] >= a["end"]) for a in accepted):
-                dropped += 1
-                continue
-            accepted.append(it)
-            count[level] += 1
+    # 겹치는 문장은 앞 카드에 질문을 합치고, 문장 수 상한을 둡니다.
+    accepted = []
+    for it in cleaned:
+        host = next((a for a in accepted if not (it["end"] <= a["start"] or it["start"] >= a["end"])), None)
+        if host:
+            have = {q["q"] for q in host["qs"]}
+            host["qs"].extend(q for q in it["qs"] if q["q"] not in have)
+            host["defend"] = host["defend"] or it["defend"]
+            continue
+        if len(accepted) >= HL_MAX_CARDS:
+            dropped += 1
+            continue
+        accepted.append(it)
     accepted.sort(key=lambda a: a["start"])
+
+    # 문단 나누기 + 문단마다 어느 영역인지(머리말을 만날 때마다 바뀜)
+    paras, pos, cur_area = [], 0, ""
+    for para in text.split("\n"):
+        head = para[:40]
+        for name, rx in _PARA_AREA_RX:
+            if rx.search(head):
+                cur_area = name
+                break
+        paras.append({"start": pos, "end": pos + len(para), "area": cur_area})
+        pos += len(para) + 1
+
+    q_no = 0
     for n, it in enumerate(accepted, 1):
         it["no"] = n
+        it["para"] = next((i for i, pa in enumerate(paras) if pa["start"] <= it["start"] <= pa["end"]), 0)
+        # 압박 질문은 카드 안에서 맨 뒤로
+        it["qs"].sort(key=lambda q: q["type"] == "압박")
+        for q in it["qs"]:
+            q_no += 1
+            q["no"] = q_no
+            q["key"] = _qkey(q["q"])
 
-    # 빈틈: 원문에 있는 영역마다 형광펜이 몇 개 닿았는지
-    gaps = []
+    count = {k: sum(1 for a in accepted if a["comp"] == k) for k in HL_COMPS}
+    gaps, gap_areas = [], []
     for name, pat in SANGBU_AREAS:
         if not re.search(pat, norm):
             continue
-        c = {k: sum(1 for a in accepted if a["area_key"] == name and a["level"] == k) for k in HL_LEVELS}
-        if sum(c.values()) == 0:
-            status = "⚠️ 빈틈 (준비 없음)"
-        elif c["확정"] == 0:
-            status = "형광펜만 (문항 없음)"
+        cards = [a for a in accepted if a["area_key"] == name]
+        nq = sum(len(a["qs"]) for a in cards)
+        if not cards:
+            status = "⚠️ 빈틈 (질문 없음)"
+            gap_areas.append(name)
         else:
             status = "준비됨"
-        gaps.append({"영역": name, "문항에서 다룸": c["확정"], "나올 가능성": c["예상"], "방어 필요": c["방어"], "상태": status})
+        gaps.append({"영역": name, "칠한 문장": len(cards), "질문": nq, "상태": status})
     subjects = sorted({a["area"].split("-", 1)[1].strip() for a in accepted
                        if a["area_key"] == "교과 세특" and "-" in a["area"]})
-    return {"text": text, "items": accepted, "dropped": dropped, "gaps": gaps, "subjects": subjects,
-            "count": count}
+    return {"text": text, "items": accepted, "paras": paras, "dropped": dropped, "gaps": gaps,
+            "gap_areas": gap_areas, "subjects": subjects, "count": count,
+            "defend": sum(1 for a in accepted if a["defend"]), "q_total": q_no,
+            "q_keys": [q["key"] for a in accepted for q in a["qs"]], "keywords": keywords[:8]}
 
 def _set_col_widths(table, widths_cm):
     """표의 열 너비를 고정합니다(워드가 자동으로 넓히지 않게)."""
@@ -2596,76 +2743,129 @@ def _set_col_widths(table, widths_cm):
 
 _RATE_LIMIT_RX = re.compile(r"429|RESOURCE_EXHAUSTED|quota|rate", re.I)
 
+def _call_gemini_retry(prompt, api_key, json_mode=False):
+    """무료 등급은 분당 사용량 한도가 낮아, 막히면 잠시 쉬고 한 번 더 부릅니다."""
+    try:
+        return call_gemini(prompt, api_key, json_mode=json_mode)
+    except Exception as e:
+        if not _RATE_LIMIT_RX.search(str(e)):
+            raise
+        time.sleep(25)
+        return call_gemini(prompt, api_key, json_mode=json_mode)
+
+def _friendly_error(e):
+    msg = str(e)
+    if _RATE_LIMIT_RX.search(msg):
+        msg = "Gemini 사용량 한도에 걸렸습니다(무료 등급은 분당 한도가 낮습니다). 1~2분 뒤 다시 시도해 주세요. — " + msg[:200]
+    return msg
+
+def set_highlight_state(hl, raw_items, student_name, target_desc):
+    st.session_state.highlight_data = hl
+    st.session_state.highlight_raw_items = raw_items
+    st.session_state.highlight_error = ""
+    st.session_state.highlight_files = (
+        create_highlight_word(hl, student_name, target_desc, is_teacher=False),
+        create_highlight_word(hl, student_name, target_desc, is_teacher=True),
+    )
+
 def run_explain_and_highlight(student_record, result_text, profile, uni_name, student_name, target_desc, api_key):
-    """'생기부 쉬운 해설'과 '형광펜 생기부'를 만들어 세션에 넣습니다.
+    """'생기부 쉬운 해설'과 '형광펜 질문 카드'를 만들어 세션에 넣습니다.
     실패해도 화면을 다시 그리면 사라지지 않도록 이유를 st.session_state.highlight_error에 남깁니다."""
     st.session_state.highlight_data = None
     st.session_state.highlight_files = None
     st.session_state.highlight_raw_items = []
     st.session_state.highlight_error = ""
-    prompt = build_explain_and_highlight_prompt(
-        student_record,
-        [qa["q"] for qa in extract_qa_pairs(result_text)],
-        highlight_priority_text(profile, uni_name),
-    )
+    questions = [qa["q"] for qa in extract_qa_pairs(result_text)]
+    priority = highlight_priority_text(profile, uni_name)
     try:
-        try:
-            raw = call_gemini(prompt, api_key)
-        except Exception as e:
-            # 무료 등급은 분당 사용량 한도가 낮아, 문항 생성 직후 바로 부르면 막힐 수 있습니다 → 잠시 쉬고 한 번 더
-            if not _RATE_LIMIT_RX.search(str(e)):
-                raise
-            time.sleep(25)
-            raw = call_gemini(prompt, api_key)
+        raw = _call_gemini_retry(build_explain_and_highlight_prompt(student_record, questions, priority), api_key)
         easy_explanation, hl_items = split_explanation_and_highlights(raw)
         st.session_state.easy_explanation_text = easy_explanation
         st.session_state.easy_explanation_file = create_easy_explanation_word(easy_explanation, student_name, target_desc)
         hl = build_highlight_data(student_record, hl_items) if hl_items else None
-        first_note = (
-            "해설 응답에 형광펜 목록이 없었습니다" if not hl_items
-            else f"해설 응답의 구절 {len(hl_items)}개가 원문과 맞지 않았습니다"
-        )
         if not (hl and hl["items"]):
-            # 해설이 길면 AI가 형광펜 부분을 빼먹는 일이 잦아, 형광펜만 JSON으로 따로 한 번 더 받습니다.
-            only_prompt = build_highlight_only_prompt(
-                student_record, [qa["q"] for qa in extract_qa_pairs(result_text)],
-                highlight_priority_text(profile, uni_name),
+            first_note = (
+                "해설 응답에 질문 카드가 없었습니다" if not hl_items
+                else "해설 응답의 문장이 원문과 맞지 않았습니다"
             )
-            try:
-                raw2 = call_gemini(only_prompt, api_key, json_mode=True)
-            except Exception as e:
-                if not _RATE_LIMIT_RX.search(str(e)):
-                    raise
-                time.sleep(25)
-                raw2 = call_gemini(only_prompt, api_key, json_mode=True)
+            # 해설이 길면 AI가 카드 부분을 빼먹는 일이 잦아, 카드만 JSON으로 따로 한 번 더 받습니다.
+            raw2 = _call_gemini_retry(build_highlight_only_prompt(student_record, questions, priority), api_key, json_mode=True)
             hl_items = _extract_hl_objects(raw2)
-            if not hl_items:
+            if not any("구절" in it for it in hl_items):
                 head = re.sub(r"\s+", " ", str(raw2))[:120]
                 st.session_state.highlight_error = (
-                    f"{first_note}. 형광펜만 다시 요청했지만 목록을 읽지 못했습니다. "
-                    f"(AI 응답 앞부분: {head})"
+                    f"{first_note}. 카드만 다시 요청했지만 목록을 읽지 못했습니다. (AI 응답 앞부분: {head})"
                 )
                 return False
             hl = build_highlight_data(student_record, hl_items)
             if not hl["items"]:
+                sample = next((str(it.get("구절", "")) for it in hl_items if "구절" in it), "")[:40]
                 st.session_state.highlight_error = (
-                    f"{first_note}. 다시 요청한 구절 {len(hl_items)}개도 모두 원문과 글자가 달라 칠하지 못했습니다. "
-                    f"(예: {str(hl_items[0].get('구절', ''))[:40]})"
+                    f"{first_note}. 다시 요청한 문장도 모두 원문과 글자가 달라 칠하지 못했습니다. (예: {sample})"
                 )
                 return False
-        st.session_state.highlight_data = hl
-        st.session_state.highlight_raw_items = hl_items
-        st.session_state.highlight_files = (
-            create_highlight_word(hl, student_name, target_desc, is_teacher=False),
-            create_highlight_word(hl, student_name, target_desc, is_teacher=True),
-        )
+        set_highlight_state(hl, hl_items, student_name, target_desc)
         return True
     except Exception as e:
-        msg = str(e)
-        if _RATE_LIMIT_RX.search(msg):
-            msg = "Gemini 사용량 한도에 걸렸습니다(무료 등급은 분당 한도가 낮습니다). 1~2분 뒤 다시 시도해 주세요. — " + msg[:200]
-        st.session_state.highlight_error = msg
+        st.session_state.highlight_error = _friendly_error(e)
         return False
+
+def add_more_questions(card_no, uni_name, major, profile, student_name, target_desc, api_key):
+    """한 카드(문장)에 새 질문 2개를 붙입니다. 성공하면 True."""
+    hl = st.session_state.get("highlight_data")
+    raw_items = list(st.session_state.get("highlight_raw_items") or [])
+    card = next((c for c in (hl or {}).get("items", []) if c["no"] == card_no), None)
+    if not card or card["raw_idx"] >= len(raw_items):
+        return False
+    pa = hl["paras"][card["para"]]
+    prompt = build_more_questions_prompt(card, hl["text"][pa["start"]:pa["end"]], uni_name, major,
+                                         highlight_priority_text(profile, uni_name))
+    try:
+        raw = _call_gemini_retry(prompt, api_key, json_mode=True)
+    except Exception as e:
+        st.session_state.highlight_notice = "질문을 더 만들지 못했습니다: " + _friendly_error(e)
+        return False
+    new_qs = []
+    for o in _extract_json_objects(raw):
+        if isinstance(o.get("질문"), list):
+            new_qs.extend(o["질문"])
+        elif isinstance(o.get("질문"), str) and "구절" not in o:
+            new_qs.append(o)
+    if not new_qs:
+        st.session_state.highlight_notice = "AI 응답에서 새 질문을 읽지 못했습니다. 다시 눌러 주세요."
+        return False
+    item = dict(raw_items[card["raw_idx"]])
+    old = item.get("질문")
+    if isinstance(old, str):
+        old = [{"질문": old, "가이드": item.get("준비", "")}]
+    item["질문"] = list(old or []) + new_qs
+    raw_items[card["raw_idx"]] = item
+    set_highlight_state(build_highlight_data(st.session_state.get("loaded_student_record_text", ""), raw_items),
+                        raw_items, student_name, target_desc)
+    return True
+
+def add_gap_cards(uni_name, profile, student_name, target_desc, api_key):
+    """질문이 하나도 없는 영역에 카드를 더 만듭니다. 성공하면 True."""
+    hl = st.session_state.get("highlight_data") or {}
+    areas = hl.get("gap_areas") or []
+    rec = st.session_state.get("loaded_student_record_text", "")
+    if not areas or not rec.strip():
+        return False
+    prompt = build_gap_cards_prompt(rec, areas, [c["quote"] for c in hl.get("items", [])],
+                                    highlight_priority_text(profile, uni_name))
+    try:
+        raw = _call_gemini_retry(prompt, api_key, json_mode=True)
+    except Exception as e:
+        st.session_state.highlight_notice = "빈 영역 질문을 만들지 못했습니다: " + _friendly_error(e)
+        return False
+    new_items = [o for o in _extract_json_objects(raw) if str(o.get("구절", "")).strip()]
+    raw_items = list(st.session_state.get("highlight_raw_items") or []) + new_items
+    new_hl = build_highlight_data(rec, raw_items)
+    if len(new_hl["items"]) <= len(hl.get("items", [])):
+        st.session_state.highlight_notice = "AI가 고른 문장이 원문과 맞지 않아 새 카드를 만들지 못했습니다. 다시 눌러 주세요."
+        return False
+    set_highlight_state(new_hl, raw_items, student_name, target_desc)
+    return True
 
 def _marker(no):
     return _CIRCLED[no - 1] if 1 <= no <= len(_CIRCLED) else f"({no})"
@@ -2678,93 +2878,263 @@ def _shade_run(run, fill_hex):
     shd.set(qn("w:fill"), fill_hex)
     rpr.append(shd)
 
+def _wavy_red(run):
+    rpr = run._r.get_or_add_rPr()
+    u = OxmlElement("w:u")
+    u.set(qn("w:val"), "wave")
+    u.set(qn("w:color"), HL_DEFEND["hex"])
+    rpr.append(u)
+
+def _q_tags(card, q):
+    tags = [HL_COMPS[card["comp"]]["label"], f"{q['type']} 질문", q["level"]]
+    if q.get("existing"):
+        tags.append("기존 문항")
+    return " · ".join(tags)
+
 def create_highlight_word(hl, student_name, target_desc, is_teacher=False):
-    """형광펜 생기부 워드 문서. 학생용은 예상 질문·준비할 것, 교사용은 칠한 이유까지 넣습니다."""
+    """형광펜 생기부 워드 문서. 칠한 문장 바로 아래에 질문이 붙습니다.
+    학생용은 질문과 자가 체크칸, 교사용은 답변 가이드와 칠한 이유까지 넣습니다."""
+    from docx.shared import Cm
     doc = Document()
     set_document_font(doc)
     doc.add_heading(f"🖍️ [{student_name}] {target_desc} 형광펜 생기부 {'(교사용)' if is_teacher else '(학생용)'}", level=1)
-    doc.add_paragraph("면접관이 짚을 만한 곳을 생기부 원문에 색으로 표시했습니다. 번호는 맨 뒤 '예상 질문' 표와 연결됩니다.")
+    doc.add_paragraph(
+        f"면접관이 짚을 만한 문장 {len(hl['items'])}곳에 역량별로 색을 칠하고, 바로 아래에 예상 질문 {hl['q_total']}개를 붙였습니다."
+    )
     legend = doc.add_paragraph()
-    for k, v in HL_LEVELS.items():
+    for k, v in HL_COMPS.items():
         r = legend.add_run(f" {v['label']} ({hl['count'].get(k, 0)}) ")
         _shade_run(r, v["fill"])
         legend.add_run("   ")
+    r = legend.add_run(f"{HL_DEFEND['label']} ({hl['defend']})")
+    _wavy_red(r)
+    if hl.get("keywords"):
+        doc.add_paragraph("핵심 키워드: " + " · ".join(hl["keywords"]))
 
     if hl["gaps"]:
         doc.add_heading("영역별 준비 상태", level=2)
-        t = doc.add_table(rows=1, cols=5)
-        t.style = "Table Grid"
-        for i, h in enumerate(["영역", "문항에서 다룸", "나올 가능성", "방어 필요", "상태"]):
-            t.rows[0].cells[i].text = h
-            set_cell_background(t.rows[0].cells[i], "EBF1FA")
-        for g in hl["gaps"]:
-            cells = t.add_row().cells
-            for i, key in enumerate(["영역", "문항에서 다룸", "나올 가능성", "방어 필요", "상태"]):
-                cells[i].text = str(g[key])
-            if g["상태"].startswith("⚠️"):
-                set_cell_background(cells[4], "FDECEA")
-        _set_col_widths(t, [3.6, 2.3, 2.3, 2.3, 5.5])
-
-    doc.add_heading("생기부 원문", level=2)
-    text, items = hl["text"], hl["items"]
-    pos = 0
-    for para in text.split("\n"):
-        p = doc.add_paragraph()
-        end = pos + len(para)
-        cur = pos
-        for it in [i for i in items if pos <= i["start"] < end]:
-            if it["start"] > cur:
-                p.add_run(text[cur:it["start"]])
-            r = p.add_run(text[it["start"]:min(it["end"], end)])
-            _shade_run(r, HL_LEVELS[it["level"]]["fill"])
-            m = p.add_run(_marker(it["no"]))
-            m.font.superscript = True
-            m.font.bold = True
-            m.font.color.rgb = RGBColor(0xC6, 0x28, 0x28)
-            cur = min(it["end"], end)
-        if cur < end:
-            p.add_run(text[cur:end])
-        pos = end + 1
-
-    if items:
-        doc.add_heading("번호별 예상 질문", level=2)
-        cols = ["번호", "구절", "예상 질문", "준비할 것"] + (["칠한 이유"] if is_teacher else [])
+        cols = ["영역", "칠한 문장", "질문", "상태"]
         t = doc.add_table(rows=1, cols=len(cols))
         t.style = "Table Grid"
         for i, h in enumerate(cols):
             t.rows[0].cells[i].text = h
             set_cell_background(t.rows[0].cells[i], "EBF1FA")
-        for it in items:
+        for g in hl["gaps"]:
             cells = t.add_row().cells
-            vals = [_marker(it["no"]), it["quote"], it["question"], it["prep"]] + ([it["reason"]] if is_teacher else [])
-            for i, v in enumerate(vals):
-                cells[i].text = v
-            set_cell_background(cells[0], HL_LEVELS[it["level"]]["fill"])
-        _set_col_widths(t, [1.1, 3.6, 4.9, 3.6, 2.8] if is_teacher else [1.1, 4.4, 6.2, 4.3])
+            for i, key in enumerate(cols):
+                cells[i].text = str(g[key])
+            if g["상태"].startswith("⚠️"):
+                set_cell_background(cells[3], "FDECEA")
+        _set_col_widths(t, [4.2, 2.4, 2.0, 7.4])
+
+    doc.add_heading("생기부 원문과 예상 질문", level=2)
+    text, items = hl["text"], hl["items"]
+    for pi, pa in enumerate(hl["paras"]):
+        start, end = pa["start"], pa["end"]
+        if start == end:
+            continue
+        cards = [c for c in items if c["para"] == pi]
+        p = doc.add_paragraph()
+        cur = start
+        for c in cards:
+            s, e = max(c["start"], start), min(c["end"], end)
+            if s > cur:
+                p.add_run(text[cur:s])
+            m = p.add_run(_marker(c["no"]))
+            m.font.superscript = True
+            m.font.bold = True
+            m.font.color.rgb = RGBColor(0xC6, 0x28, 0x28)
+            r = p.add_run(text[s:e])
+            _shade_run(r, HL_COMPS[c["comp"]]["fill"])
+            if c["defend"]:
+                _wavy_red(r)
+            cur = e
+        if cur < end:
+            p.add_run(text[cur:end])
+        for c in cards:
+            for q in c["qs"]:
+                qp = doc.add_paragraph()
+                qp.paragraph_format.left_indent = Cm(0.8)
+                qp.paragraph_format.space_after = Pt(0)
+                head = qp.add_run(f"{q['no']}. {_marker(c['no'])} ")
+                head.bold = True
+                qp.add_run(q["q"])
+                tp = doc.add_paragraph()
+                tp.paragraph_format.left_indent = Cm(0.8)
+                tp.paragraph_format.space_after = Pt(0 if is_teacher else 6)
+                tr = tp.add_run(_q_tags(c, q) + ("" if is_teacher else "     □ 자신 있음  □ 애매  □ 모름"))
+                tr.font.size = Pt(8.5)
+                tr.font.color.rgb = RGBColor(0x75, 0x75, 0x75)
+                if is_teacher and q.get("guide"):
+                    gp = doc.add_paragraph()
+                    gp.paragraph_format.left_indent = Cm(0.8)
+                    gp.paragraph_format.space_after = Pt(4)
+                    gr = gp.add_run("답변 가이드: " + q["guide"])
+                    gr.font.size = Pt(9)
+                    gr.font.color.rgb = RGBColor(0x1F, 0x4E, 0x79)
+            if is_teacher and c.get("reason"):
+                rp = doc.add_paragraph()
+                rp.paragraph_format.left_indent = Cm(0.8)
+                rr = rp.add_run(f"{_marker(c['no'])} 칠한 이유: {c['reason']}")
+                rr.font.size = Pt(8.5)
+                rr.italic = True
     suffix = "교사용" if is_teacher else "학생용"
     path = _out_path(f"{student_name}_형광펜생기부_{suffix}.docx")
     doc.save(path)
     return path
 
-def render_highlight_html(hl):
-    """앱 화면에 보여줄 형광펜 원문(HTML)."""
+def _para_html(text, start, end, cards, show_defend):
     import html as _html
-    text, out, cur = hl["text"], [], 0
-    for it in hl["items"]:
-        out.append(_html.escape(text[cur:it["start"]]))
-        tip = _html.escape(it["question"], quote=True)
+    out, cur = [], start
+    for c in cards:
+        s, e = max(c["start"], start), min(c["end"], end)
+        out.append(_html.escape(text[cur:s]))
+        style = f"background:{HL_COMPS[c['comp']]['css']};color:#111;padding:1px 2px;border-radius:3px"
+        if c["defend"] and show_defend:
+            style += f";text-decoration:underline wavy {HL_DEFEND['css']};text-underline-offset:4px"
         out.append(
-            f'<mark title="{tip}" style="background:{HL_LEVELS[it["level"]]["css"]};color:#111;padding:0 2px;border-radius:3px">'
-            f'{_html.escape(text[it["start"]:it["end"]])}</mark><sup style="color:#c62828;font-weight:700">{_marker(it["no"])}</sup>'
+            f'<sup style="color:#c62828;font-weight:700">{_marker(c["no"])}</sup>'
+            f'<mark style="{style}">{_html.escape(text[s:e])}</mark>'
         )
-        cur = it["end"]
-    out.append(_html.escape(text[cur:]))
-    body = "".join(out).replace("\n", "<br><br>")
-    return (
-        '<div style="max-height:560px;overflow:auto;padding:14px 16px;border:1px solid rgba(128,128,128,.35);'
-        f'border-radius:8px;line-height:1.85;font-size:0.95rem">{body}</div>'
-    )
+        cur = e
+    out.append(_html.escape(text[cur:end]))
+    return f'<div style="line-height:1.9;font-size:0.97rem;margin:4px 0 6px">{"".join(out)}</div>'
 
+def _quiet_save(save_args):
+    """카드 화면에서의 자동 저장. 저장이 실패해도 화면은 멈추지 않게 합니다(사이드바 저장 상태에 표시됨)."""
+    try:
+        save_current_session(*save_args, quiet=True)
+    except Exception as e:
+        st.session_state["last_save_info"] = {"ok": False, "where": "저장 안 됨", "error": str(e),
+                                              "at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+def _save_card_check(qkey, widget_key, save_args):
+    st.session_state.setdefault("card_checks", {})[qkey] = st.session_state.get(widget_key, "미확인")
+    _quiet_save(save_args)
+
+def render_card_view(hl, student_name, uni, major, interview_type, difficulty, target_desc, api_key):
+    """형광펜 생기부 · 질문 카드 화면. 질문은 근거 문장 바로 아래에 붙습니다."""
+    checks = st.session_state.setdefault("card_checks", {})
+    save_args = (student_name, uni, major, interview_type, difficulty)
+    profile = cached_interview_profile(APP_DIR, uni, major)
+
+    st.markdown("### 🖍️ 형광펜 생기부 · 질문 카드")
+    st.caption(f"칠한 문장 {len(hl['items'])}곳 · 질문 {hl['q_total']}개 — 질문은 근거 문장 바로 아래에 붙어 있습니다.")
+    if st.session_state.get("highlight_notice"):
+        st.warning(st.session_state.pop("highlight_notice"))
+
+    left, right = st.columns([7, 3], gap="medium")
+    with right:
+        with st.container(border=True):
+            st.markdown("**칠한 역량**")
+            show = {k: st.checkbox(f"{v['icon']} {v['label']} ({hl['count'][k]})", value=True, key=f"hl_show_{k}")
+                    for k, v in HL_COMPS.items()}
+            show_def = st.checkbox(f"{HL_DEFEND['icon']} {HL_DEFEND['label']} 밑줄 ({hl['defend']})", value=True, key="hl_show_def")
+            only_marked = st.checkbox("칠한 문단만 보기", value=True, key="hl_only_marked")
+            only_weak = st.checkbox("애매·모름 질문만 보기", value=False, key="hl_only_weak")
+
+        with st.container(border=True):
+            keys = hl["q_keys"]
+            done = sum(1 for k in keys if checks.get(k) == "자신 있음")
+            n_amb = sum(1 for k in keys if checks.get(k) == "애매")
+            n_no = sum(1 for k in keys if checks.get(k) == "모름")
+            st.markdown(f"**연습 진도** {done}/{len(keys)}")
+            st.progress(done / len(keys) if keys else 0.0)
+            st.caption(f"애매 {n_amb} · 모름 {n_no} — 질문마다 아래에서 표시하면 기록에 저장됩니다.")
+
+        with st.container(border=True):
+            st.markdown("**질문 더 만들기**")
+            if hl["gap_areas"]:
+                st.caption("질문이 하나도 없는 영역: " + ", ".join(hl["gap_areas"]))
+                if st.button(f"➕ 질문 없는 {len(hl['gap_areas'])}곳에 질문 만들기", use_container_width=True,
+                             key="hl_fill_gaps", disabled=not api_key):
+                    with st.spinner("빈 영역에서 문장을 골라 질문을 만드는 중입니다..."):
+                        if add_gap_cards(uni, profile, student_name, target_desc, api_key):
+                            _quiet_save(save_args)
+                    st.rerun()
+            else:
+                st.caption("모든 영역에 질문이 있습니다.")
+            st.caption("문장마다 '➕ 질문 더 만들기'를 누르면 그 문장에서 새 질문이 2개씩 나옵니다.")
+            if hl["gaps"]:
+                with st.popover("영역별 준비 상태", use_container_width=True):
+                    st.dataframe(pd.DataFrame(hl["gaps"]), hide_index=True, use_container_width=True)
+                    if hl.get("subjects"):
+                        st.caption("질문이 닿은 세특 과목: " + ", ".join(hl["subjects"]))
+
+        with st.container(border=True):
+            st.markdown(f"**{uni} 면접 정보**")
+            try:
+                info = get_univ_info(univ_info_db, uni, major)
+            except Exception:
+                info = None
+            if info is not None:     # 대학·학과 한 줄(pandas Series)
+                for col in ["면접유형", "면접시간", "면접위원"]:
+                    val = str(info.get(col, "") or "").strip()
+                    if val and val.lower() != "nan":
+                        st.caption(f"{col}: {val}")
+            share, basis = pick_allocation_basis(profile)
+            if share:
+                for t, v in sorted(share.items(), key=lambda kv: -kv[1])[:4]:
+                    st.caption(f"{t} {int(round(v * 100))}%")
+                st.caption(f"기준: {basis}")
+            elif info is None:
+                st.caption("이 대학의 면접 자료가 아직 없습니다.")
+
+        if hl.get("keywords"):
+            with st.container(border=True):
+                st.markdown("**핵심 키워드**")
+                st.markdown(" ".join(f"`{k}`" for k in hl["keywords"]))
+
+    with left:
+        with st.container(height=900, border=True):
+            text, shown_any, last_area = hl["text"], False, None
+            for pi, pa in enumerate(hl["paras"]):
+                start, end = pa["start"], pa["end"]
+                if start == end:
+                    continue
+                cards = [c for c in hl["items"] if c["para"] == pi and show[c["comp"]]]
+                if only_weak:
+                    cards = [c for c in cards if any(checks.get(q["key"]) in ("애매", "모름") for q in c["qs"])]
+                if not cards and (only_marked or only_weak):
+                    continue
+                shown_any = True
+                if pa["area"] and pa["area"] != last_area:
+                    st.caption(f"📂 {pa['area']}")
+                    last_area = pa["area"]
+                st.markdown(_para_html(text, start, end, cards, show_def), unsafe_allow_html=True)
+                for c in cards:
+                    with st.container(border=True):
+                        for q in c["qs"]:
+                            if only_weak and checks.get(q["key"]) not in ("애매", "모름"):
+                                continue
+                            pressure = " · ⚠️ 압박 대비" if q["type"] == "압박" else ""
+                            st.markdown(
+                                f"**{q['no']}.** {_marker(c['no'])} {_md_safe(q['q'])}  \n"
+                                f":gray[{HL_COMPS[c['comp']]['icon']} {_q_tags(c, q)}{pressure}]"
+                            )
+                            chk_col, guide_col = st.columns([3, 1.4], vertical_alignment="center")
+                            with chk_col:
+                                wkey = f"chk_{q['key']}"
+                                cur = checks.get(q["key"], "미확인")
+                                st.radio(
+                                    "준비 상태", _CHECK_OPTS, horizontal=True, label_visibility="collapsed", key=wkey,
+                                    index=_CHECK_OPTS.index(cur) if cur in _CHECK_OPTS else 0,
+                                    on_change=_save_card_check, args=(q["key"], wkey, save_args),
+                                )
+                            with guide_col:
+                                if q.get("guide"):
+                                    with st.popover("답변 가이드", use_container_width=True):
+                                        st.markdown(_md_safe(q["guide"]))
+                        if st.button("➕ 이 문장으로 질문 더 만들기", key=f"hl_more_{c['no']}_{c['raw_idx']}",
+                                     disabled=not api_key):
+                            with st.spinner("이 문장에서 새 질문을 만드는 중입니다..."):
+                                if add_more_questions(c["no"], uni, major, profile, student_name, target_desc, api_key):
+                                    _quiet_save(save_args)
+                            st.rerun()
+            if not shown_any:
+                st.info("보여줄 문장이 없습니다. 오른쪽에서 역량 선택이나 '애매·모름 질문만 보기'를 바꿔 보세요.")
+        if hl.get("dropped"):
+            st.caption(f"AI가 고른 문장 중 {hl['dropped']}개는 원문과 글자가 달라 칠하지 않았습니다(원문을 바꾸지 않기 위해).")
 
 # -------------------------------------------------------------------------
 # [2-1] 생성된 문항에서 [질문]/[문제 N] ↔ [모범답안]/[모범답안 N] 쌍만 순서대로 뽑아내기
@@ -3134,6 +3504,7 @@ if "highlight_data" not in st.session_state: st.session_state.highlight_data = N
 if "highlight_files" not in st.session_state: st.session_state.highlight_files = None
 if "highlight_error" not in st.session_state: st.session_state.highlight_error = ""
 if "highlight_raw_items" not in st.session_state: st.session_state.highlight_raw_items = []
+if "card_checks" not in st.session_state: st.session_state.card_checks = {}
 if "summary_card_file" not in st.session_state: st.session_state.summary_card_file = None
 if "growth_report_file" not in st.session_state: st.session_state.growth_report_file = None
 if "evaluation_sheet_file" not in st.session_state: st.session_state.evaluation_sheet_file = None
@@ -3277,6 +3648,9 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                             st.session_state["easy_explanation_file"] = create_easy_explanation_word(_easy, _ld_name, _ld_desc)
                         except Exception:
                             pass
+                    st.session_state["card_checks"] = dict(_extras.get("card_checks") or {})
+                    for _k in [k for k in list(st.session_state.keys()) if str(k).startswith("chk_")]:
+                        del st.session_state[_k]
                     _items = [it for it in (_extras.get("highlight_items") or []) if isinstance(it, dict)]
                     if _items and _ld_rec.strip():
                         try:
@@ -4104,29 +4478,7 @@ if st.session_state.chat_history:
                         save_current_session(student_name, uni, major, interview_type, difficulty, quiet=True)
                 st.rerun()
     if _hl and _hl.get("items"):
-        _c = _hl["count"]
-        _gap_n = sum(1 for g in _hl["gaps"] if g["상태"].startswith("⚠️"))
-        with st.expander(
-            f"🖍️ 형광펜 생기부 — 🟨 다룸 {_c['확정']} · 🟧 나올 가능성 {_c['예상']} · 🟦 방어 {_c['방어']}"
-            + (f" · ⚠️ 빈틈 {_gap_n}곳" if _gap_n else ""),
-            expanded=True,
-        ):
-            st.caption(" · ".join(f"{v['icon']} {v['label']}" for v in HL_LEVELS.values())
-                       + " — 칠한 곳에 마우스를 올리면 예상 질문이 보입니다.")
-            if _hl["gaps"]:
-                st.markdown("**영역별 준비 상태**")
-                st.dataframe(pd.DataFrame(_hl["gaps"]), hide_index=True, use_container_width=True)
-                if _hl.get("subjects"):
-                    st.caption("형광펜이 닿은 세특 과목: " + ", ".join(_hl["subjects"]))
-            st.markdown(render_highlight_html(_hl), unsafe_allow_html=True)
-            st.markdown("**번호별 예상 질문**")
-            for it in _hl["items"]:
-                st.markdown(
-                    f"{HL_LEVELS[it['level']]['icon']} **{_marker(it['no'])}** {_md_safe(it['question'])}  \n"
-                    f"　└ 준비: {_md_safe(it['prep'])}"
-                )
-            if _hl.get("dropped"):
-                st.caption(f"AI가 고른 구절 중 {_hl['dropped']}개는 원문과 글자가 달라 칠하지 않았습니다(원문을 바꾸지 않기 위해).")
+        render_card_view(_hl, student_name, uni, major, interview_type, difficulty, target_desc, api_key)
 
     if st.session_state.get("easy_explanation_text"):
         with st.expander("📚 생기부 쉬운 해설 미리보기 (고등학교 1학년 눈높이)", expanded=False):
