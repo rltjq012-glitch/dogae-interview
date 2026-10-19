@@ -2878,6 +2878,83 @@ def _shade_run(run, fill_hex):
     shd.set(qn("w:fill"), fill_hex)
     rpr.append(shd)
 
+_SET_TAG_RX = re.compile(r"\[(질문|평가요소|평가의도|모범답안|꼬리질문)\]")
+
+def sangbu_sets(result_text):
+    """생기부 5세트 문항을 [{no, title, 질문, 평가요소, 평가의도, 모범답안, 꼬리질문}]로 읽습니다."""
+    out = []
+    for block in str(result_text or "").split("### 📌")[1:]:
+        lines = block.strip().split("\n")
+        title = re.sub(r"[*]", "", lines[0]).strip() if lines else ""
+        body = "\n".join(lines[1:])
+        parts = _SET_TAG_RX.split(body)
+        d = {"title": title}
+        for i in range(1, len(parts) - 1, 2):
+            d[parts[i]] = parts[i + 1].strip()
+        if d.get("질문"):
+            d["no"] = len(out) + 1
+            out.append(d)
+    return out
+
+def _q_norm(text):
+    return re.sub(r"[\s\W_]", "", str(text or ""))
+
+def attach_set_details(hl, result_text):
+    """카드의 '기존 문항'에 5세트 원문의 평가의도·모범답안·꼬리질문을 붙입니다.
+    카드에 붙지 못한 세트는 목록으로 돌려줍니다(화면 맨 아래에 따로 보여 줌)."""
+    sets = sangbu_sets(result_text)
+    used = set()
+    for c in (hl or {}).get("items", []):
+        for q in c["qs"]:
+            q.pop("detail", None)
+            q.pop("set_no", None)
+            qn = _q_norm(q["q"])
+            if not qn:
+                continue
+            best, best_r = None, 0.0
+            for d in sets:
+                if d["no"] in used:
+                    continue
+                dn = _q_norm(d["질문"])
+                if not dn:
+                    continue
+                r = 1.0 if (qn in dn or dn in qn) and min(len(qn), len(dn)) >= 12 else difflib.SequenceMatcher(None, qn, dn).ratio()
+                if r > best_r:
+                    best, best_r = d, r
+            if best is not None and best_r >= 0.72:
+                used.add(best["no"])
+                q["detail"] = best
+                q["set_no"] = best["no"]
+                q["existing"] = True
+    return [d for d in sets if d["no"] not in used]
+
+def sangbu_briefing(result_text):
+    """브리핑 리포트를 {항목명: 내용}으로 읽습니다."""
+    m = re.search(r"### 🔍 \[생기부 심층 분석 브리핑 리포트\](.*?)(?=### 📌|### 📄|$)", str(result_text or ""), re.DOTALL)
+    if not m:
+        return {}
+    out = {}
+    for mm in re.finditer(r"-\s*\*\*(.+?)[:：]?\*\*\s*[:：]?\s*(.*?)(?=\n\s*-\s*\*\*|\Z)", m.group(1).strip(), re.DOTALL):
+        label = mm.group(1).strip().rstrip(":：")
+        body = mm.group(2).strip()
+        if body:
+            out[label] = body
+    return out
+
+def _first_sentence(text, limit=110):
+    t = re.sub(r"\s+", " ", str(text or "")).strip()
+    m = re.search(r"^(.+?[.!?。]|.+?(?:다|음|함)\.)\s", t + " ")
+    t = m.group(1) if m else t
+    return t[:limit] + ("…" if len(t) > limit else "")
+
+def _set_detail_md(d):
+    parts = []
+    for key, label in [("평가요소", "🏷️ 평가 요소"), ("평가의도", "🎯 평가 의도"),
+                       ("모범답안", "✅ 모범 답안"), ("꼬리질문", "🔥 꼬리질문")]:
+        if d.get(key):
+            parts.append(f"**{label}**  \n{_md_safe(d[key])}")
+    return "\n\n".join(parts)
+
 def _wavy_red(run):
     rpr = run._r.get_or_add_rPr()
     u = OxmlElement("w:u")
@@ -2887,7 +2964,9 @@ def _wavy_red(run):
 
 def _q_tags(card, q):
     tags = [HL_COMPS[card["comp"]]["label"], f"{q['type']} 질문", q["level"]]
-    if q.get("existing"):
+    if q.get("set_no"):
+        tags.append(f"5세트 {q['set_no']}번")
+    elif q.get("existing"):
         tags.append("기존 문항")
     return " · ".join(tags)
 
@@ -2895,6 +2974,10 @@ def create_highlight_word(hl, student_name, target_desc, is_teacher=False):
     """형광펜 생기부 워드 문서. 칠한 문장 바로 아래에 질문이 붙습니다.
     학생용은 질문과 자가 체크칸, 교사용은 답변 가이드와 칠한 이유까지 넣습니다."""
     from docx.shared import Cm
+    try:
+        unmatched_sets = attach_set_details(hl, st.session_state.get("last_result_text", ""))
+    except Exception:
+        unmatched_sets = []
     doc = Document()
     set_document_font(doc)
     doc.add_heading(f"🖍️ [{student_name}] {target_desc} 형광펜 생기부 {'(교사용)' if is_teacher else '(학생용)'}", level=1)
@@ -2972,12 +3055,31 @@ def create_highlight_word(hl, student_name, target_desc, is_teacher=False):
                     gr = gp.add_run("답변 가이드: " + q["guide"])
                     gr.font.size = Pt(9)
                     gr.font.color.rgb = RGBColor(0x1F, 0x4E, 0x79)
+                if is_teacher and q.get("detail"):
+                    for key in ("모범답안", "꼬리질문"):
+                        if q["detail"].get(key):
+                            dp = doc.add_paragraph()
+                            dp.paragraph_format.left_indent = Cm(0.8)
+                            dp.paragraph_format.space_after = Pt(4)
+                            dr = dp.add_run(f"{key}: " + re.sub(r"\s+", " ", q["detail"][key]))
+                            dr.font.size = Pt(9)
             if is_teacher and c.get("reason"):
                 rp = doc.add_paragraph()
                 rp.paragraph_format.left_indent = Cm(0.8)
                 rr = rp.add_run(f"{_marker(c['no'])} 칠한 이유: {c['reason']}")
                 rr.font.size = Pt(8.5)
                 rr.italic = True
+    if unmatched_sets:
+        doc.add_heading("문장에 붙지 않은 5세트 문항", level=2)
+        for d in unmatched_sets:
+            qp = doc.add_paragraph()
+            qp.add_run(f"5세트 {d['no']}번 · {d['title']}  ").bold = True
+            qp.add_run(re.sub(r"\s+", " ", d["질문"]))
+            if is_teacher:
+                for key in ("모범답안", "꼬리질문"):
+                    if d.get(key):
+                        dr = doc.add_paragraph().add_run(f"{key}: " + re.sub(r"\s+", " ", d[key]))
+                        dr.font.size = Pt(9)
     suffix = "교사용" if is_teacher else "학생용"
     path = _out_path(f"{student_name}_형광펜생기부_{suffix}.docx")
     doc.save(path)
@@ -3018,10 +3120,32 @@ def render_card_view(hl, student_name, uni, major, interview_type, difficulty, t
     save_args = (student_name, uni, major, interview_type, difficulty)
     profile = cached_interview_profile(APP_DIR, uni, major)
 
+    result_text = st.session_state.get("last_result_text", "")
+    unmatched_sets = attach_set_details(hl, result_text)
+    n_sets = len(sangbu_sets(result_text))
+
     st.markdown("### 🖍️ 형광펜 생기부 · 질문 카드")
-    st.caption(f"칠한 문장 {len(hl['items'])}곳 · 질문 {hl['q_total']}개 — 질문은 근거 문장 바로 아래에 붙어 있습니다.")
+    st.caption(
+        f"칠한 문장 {len(hl['items'])}곳 · 질문 {hl['q_total']}개 — 질문은 근거 문장 바로 아래에 붙어 있습니다."
+        + (f" 5세트 문항 {n_sets - len(unmatched_sets)}개도 근거 문장에 합쳐 두었습니다." if n_sets else "")
+    )
     if st.session_state.get("highlight_notice"):
         st.warning(st.session_state.pop("highlight_notice"))
+
+    brief = sangbu_briefing(result_text)
+    if brief:
+        with st.container(border=True):
+            st.markdown("**🔍 생기부 분석 요약**")
+            items = list(brief.items())
+            strength = next(((k, v) for k, v in items if "강점" in k), items[0])
+            st.markdown(f"**{strength[0]}**  \n{_md_safe(strength[1])}")
+            rest = [(k, v) for k, v in items if k != strength[0]]
+            for k, v in rest:
+                st.markdown(f"**{k}** — {_md_safe(_first_sentence(v))}")
+            if rest:
+                with st.expander("약점 방어 · 공략 포인트 자세히 (카드의 〰️ 밑줄·압박 질문과 같은 내용)"):
+                    for k, v in rest:
+                        st.markdown(f"**{k}**  \n{_md_safe(v)}")
 
     left, right = st.columns([7, 3], gap="medium")
     with right:
@@ -3122,9 +3246,12 @@ def render_card_view(hl, student_name, uni, major, interview_type, difficulty, t
                                     on_change=_save_card_check, args=(q["key"], wkey, save_args),
                                 )
                             with guide_col:
-                                if q.get("guide"):
+                                if q.get("guide") or q.get("detail"):
                                     with st.popover("답변 가이드", use_container_width=True):
-                                        st.markdown(_md_safe(q["guide"]))
+                                        if q.get("guide"):
+                                            st.markdown(_md_safe(q["guide"]))
+                                        if q.get("detail"):
+                                            st.markdown(_set_detail_md(q["detail"]))
                         if st.button("➕ 이 문장으로 질문 더 만들기", key=f"hl_more_{c['no']}_{c['raw_idx']}",
                                      disabled=not api_key):
                             with st.spinner("이 문장에서 새 질문을 만드는 중입니다..."):
@@ -3133,6 +3260,12 @@ def render_card_view(hl, student_name, uni, major, interview_type, difficulty, t
                             st.rerun()
             if not shown_any:
                 st.info("보여줄 문장이 없습니다. 오른쪽에서 역량 선택이나 '애매·모름 질문만 보기'를 바꿔 보세요.")
+        if unmatched_sets:
+            with st.expander(f"📌 근거 문장에 붙지 않은 5세트 문항 {len(unmatched_sets)}개"):
+                for d in unmatched_sets:
+                    st.markdown(f"**5세트 {d['no']}번 · {_md_safe(d['title'])}**  \n{_md_safe(d['질문'])}")
+                    st.markdown(_set_detail_md({k: v for k, v in d.items() if k != "질문"}))
+                    st.divider()
         if hl.get("dropped"):
             st.caption(f"AI가 고른 문장 중 {hl['dropped']}개는 원문과 글자가 달라 칠하지 않았습니다(원문을 바꾸지 않기 위해).")
 
@@ -4520,9 +4653,20 @@ if st.session_state.chat_history:
 
     st.divider()
 
-    for message in st.session_state.chat_history:
+    _cards_on = (interview_type == "생기부 기반 면접"
+                 and bool((st.session_state.get("highlight_data") or {}).get("items")))
+    for _mi, message in enumerate(st.session_state.chat_history):
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            if _cards_on and _mi == 0 and message["role"] == "assistant" and "### 📌" in str(message["content"]):
+                st.markdown(
+                    "🖍️ 5세트 문항은 위 **형광펜 질문 카드**에 근거 문장과 함께 합쳐 두었습니다. "
+                    "각 질문의 **'답변 가이드'**에서 평가 의도·모범 답안·꼬리질문을 볼 수 있습니다.  \n"
+                    "문항을 고치거나 더 만들고 싶으면 아래 채팅창에 말씀해 주세요."
+                )
+                with st.expander("📄 문항 원문 전체 보기 (워드 워크북과 같은 내용)"):
+                    st.markdown(message["content"])
+            else:
+                st.markdown(message["content"])
 
     st.markdown("💡 **Tip:** 아래 채팅창에서 📱휴대폰 키보드 마이크(🎤)를 눌러 말하거나, 우측 🎙️ 녹음 버튼을 활용해 보세요!")
 
