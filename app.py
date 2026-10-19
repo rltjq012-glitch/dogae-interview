@@ -1900,7 +1900,7 @@ def _delete_record_raw(record_id):
 
 def list_records():
     """로그인한 교사가 볼 수 있는 기록만 돌려줍니다(관리자는 전체)."""
-    return [r for r in _list_records_raw() if can_access_record(r["id"])]
+    return [r for r in _list_records_raw() if not is_practice_id(r["id"]) and can_access_record(r["id"])]
 
 def get_record(record_id):
     if not can_access_record(record_id):
@@ -3456,6 +3456,11 @@ def render_card_view(hl, student_name, uni, major, interview_type, difficulty, t
                     st.divider()
         if hl.get("dropped"):
             st.caption(f"AI가 고른 문장 중 {hl['dropped']}개는 원문과 글자가 달라 칠하지 않았습니다(원문을 바꾸지 않기 위해).")
+    st.divider()
+    try:
+        render_teacher_practice(hl, student_name, uni, major)
+    except Exception as e:
+        st.warning(f"학생 연습 현황을 불러오지 못했습니다: {e}")
 
 # -------------------------------------------------------------------------
 # [2-1] 생성된 문항에서 [질문]/[문제 N] ↔ [모범답안]/[모범답안 N] 쌍만 순서대로 뽑아내기
@@ -3770,7 +3775,7 @@ def create_evaluation_sheet_word(result_text, student_name, university, major, i
 # [2-2] 여러 회차의 저장 기록을 모아 학생의 "성장 리포트"를 만들기
 #   (새 저장소를 만들지 않고, 기존 list_records()/get_record()로 이미 쌓인 기록을 재사용합니다)
 # -------------------------------------------------------------------------
-def build_growth_report_prompt(student_name, sessions):
+def build_growth_report_prompt(student_name, sessions, practice_text=""):
     session_blocks = []
     for i, s in enumerate(sessions, start=1):
         chat_summary = "\n".join(
@@ -3781,7 +3786,9 @@ def build_growth_report_prompt(student_name, sessions):
             f"[{i}회차 — {s.get('updated_at', '')}, {s.get('university', '')} {s.get('major', '')}]\n"
             f"{chat_summary if chat_summary else '(대화 기록 없음)'}"
         )
-    joined = "\n\n".join(session_blocks)
+    joined = "\n\n".join(session_blocks) or "(모의면접 대화 기록 없음)"
+    if practice_text:
+        joined += "\n\n[휴대폰 답안 연습 기록 — 학생이 직접 쓰거나 말한 답을 AI가 근거·구조·구체성·전공연결 4기준(각 5점)으로 첨삭한 결과]\n" + practice_text
     return f"""
     당신은 학생의 모의면접 연습 기록을 시간 순서대로 검토하고 성장 과정을 분석하는 입시 지도 전문가입니다.
     아래는 '{student_name}' 학생이 여러 차례에 걸쳐 진행한 모의면접 연습 기록(회차 순서대로)입니다.
@@ -3830,6 +3837,949 @@ if "summary_card_file" not in st.session_state: st.session_state.summary_card_fi
 if "growth_report_file" not in st.session_state: st.session_state.growth_report_file = None
 if "evaluation_sheet_file" not in st.session_state: st.session_state.evaluation_sheet_file = None
 if "last_save_info" not in st.session_state: st.session_state.last_save_info = None
+
+# =========================================================================
+# 📱 학생 연습 — 학생별 링크로 휴대폰·패드에서 답변 작성 → AI 첨삭
+#   저장은 기존 기록 저장소(구글시트 Apps Script / 서비스 계정 / 로컬)를 그대로 씁니다.
+#   어느 저장 방식에서나 확실히 남는 칸(id·이름·대학·학과·result_text·chat_history)만 사용합니다.
+#     STU-<묶음키>.<토큰>  : 학생 링크 (PIN, 하루 첨삭 횟수, 학생에게 보낼 질문·근거·모범답안)
+#     ANS-<묶음키>         : 학생 답안·첨삭 기록 (학생 기기에서 저장)
+#     CMT-<묶음키>         : 선생님 코멘트
+#   <묶음키>는 선생님 기록 id에서 만든 해시라서, 링크를 새로 만들어도 답안 기록은 이어집니다.
+# =========================================================================
+import hashlib as _hashlib
+import secrets as _pysecrets
+import wave as _wave
+
+STU_PREFIX, ANS_PREFIX, CMT_PREFIX = "STU-", "ANS-", "CMT-"
+STU_DAILY_LIMIT = 30
+FB_CRITERIA = ["근거", "구조", "구체성", "전공연결"]
+FB_CRITERIA_HELP = {
+    "근거": "생기부 속 활동을 근거로 들었나",
+    "구조": "결론부터 말하고 근거 → 배운 점 순서인가",
+    "구체성": "과정·맡은 역할·수치가 구체적인가",
+    "전공연결": "지원 학과·진로와 이어지는가",
+}
+FOLLOW_MAX = 3                 # 꼬리질문 이어 답하기 최대 단계
+_ROW_CHUNK = 38000             # 저장 칸 하나에 넣을 최대 글자 수
+_ROW_TOTAL = 76000             # 한 줄(result_text + chat_history)에 넣을 최대 글자 수
+
+
+def is_practice_id(rid):
+    return str(rid or "").startswith((STU_PREFIX, ANS_PREFIX, CMT_PREFIX))
+
+
+def _bundle_key(record_id):
+    return _hashlib.sha256(str(record_id).encode("utf-8")).hexdigest()[:16]
+
+
+def _kst_now():
+    return datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+
+
+def _kst_today():
+    return _kst_now().strftime("%Y-%m-%d")
+
+
+def _kst_stamp():
+    return _kst_now().strftime("%Y-%m-%d %H:%M")
+
+
+def _row_get(row, key, default=""):
+    try:
+        v = row[key]
+    except Exception:
+        return default
+    if v is None or str(v).strip().lower() in ("none", "nan"):
+        return default
+    return v
+
+
+def storage_is_shared():
+    """학생 기기와 선생님 기기가 같은 기록을 보려면 구글시트 저장이 필요합니다."""
+    return _appsscript_enabled() or _sheets_enabled()
+
+
+def _save_json_row(row_id, name, uni, major, kind, obj):
+    """JSON을 result_text(1칸)와 chat_history(넘치는 부분)에 나눠 저장합니다.
+    각 칸 앞에 'J'를 붙여, 구글시트가 '='·'+'로 시작하는 조각을 수식으로 읽지 않게 합니다."""
+    s = json.dumps(obj, ensure_ascii=False)
+    if len(s) > _ROW_TOTAL:
+        raise RuntimeError(f"저장할 내용이 너무 많습니다({len(s):,}자).")
+    a, b = s[:_ROW_CHUNK], s[_ROW_CHUNK:]
+    return save_record(row_id, name, uni, major, kind, "", "", "J" + a,
+                       ([{"c": "J" + b}] if b else []), quiet=True)
+
+
+def _load_json_row(row_id):
+    """(행, JSON dict)을 돌려줍니다. 없으면 (None, {})."""
+    try:
+        row = _get_record_raw(row_id)
+    except Exception:
+        row = None
+    if not row:
+        return None, {}
+    a = str(_row_get(row, "result_text", ""))
+    hist, _ = load_saved_history(_row_get(row, "chat_history", ""))
+    b = str(hist[0].get("c", "")) if hist and isinstance(hist[0], dict) else ""
+    a, b = (a[1:] if a.startswith("J") else a), (b[1:] if b.startswith("J") else b)
+    try:
+        obj = json.loads(a + b) if (a + b).strip() else {}
+    except Exception:
+        obj = {}
+    return row, (obj if isinstance(obj, dict) else {})
+
+
+def mask_personal(text, name):
+    """AI로 보내기 전에 학생 이름을 가립니다(성명 전체, 세 글자 이름이면 이름 두 글자도)."""
+    t = str(text or "")
+    n = re.sub(r"\s+", "", str(name or ""))
+    if len(n) >= 2:
+        t = re.sub(r"\s*".join(map(re.escape, n)), "○○", t)
+        if len(n) == 3 and re.fullmatch(r"[가-힣]{3}", n):
+            t = re.sub(re.escape(n[1:]) + r"(?=[이가은는을를의에와과도만,.\s]|$)", "○○", t)
+    return t
+
+
+# ---------------------------------------------------------------- 저장 행 다루기
+def practice_link_rows(record_id=None):
+    """학생 링크 줄 목록(id·이름·대학·학과). record_id를 주면 그 기록의 링크만."""
+    try:
+        rows = _list_records_raw()
+    except Exception:
+        rows = []
+    out = [r for r in rows if str(_row_get(r, "id", "")).startswith(STU_PREFIX)]
+    if record_id:
+        pre = f"{STU_PREFIX}{_bundle_key(record_id)}."
+        out = [r for r in out if str(_row_get(r, "id", "")).startswith(pre)]
+    return out
+
+
+def practice_snapshot(hl, result_text, record_text, name):
+    """학생에게 보낼 질문·근거·모범답안과, 첨삭 때 대조할 생기부(이름 가림)."""
+    attach_set_details(hl, result_text)
+    qs = []
+    for c in hl.get("items", []):
+        pa = hl["paras"][c["para"]]
+        para = hl["text"][pa["start"]:pa["end"]]
+        for q in c["qs"]:
+            d = q.get("detail") or {}
+            qs.append({
+                "key": q["key"], "no": q["no"], "q": mask_personal(q["q"], name),
+                "quote": mask_personal(c["quote"], name), "area": pa["area"] or c["area_key"],
+                "para": mask_personal(para, name)[:500], "comp": c["comp"], "type": q["type"],
+                "level": q["level"], "guide": q.get("guide", ""), "answer": mask_personal(answer_of(q), name),
+                "tail": d.get("꼬리질문", ""),
+            })
+    rec = mask_personal(trim_record_for_review(record_text), name) if str(record_text or "").strip() else ""
+    if not rec:
+        seen, parts = set(), []
+        for q in qs:
+            if q["para"] not in seen:
+                seen.add(q["para"])
+                parts.append(q["para"])
+        rec = "\n".join(parts)
+    return {"qs": qs, "record": rec[:15000]}
+
+
+def save_student_link(token, record_id, name, uni, major, settings, snapshot):
+    obj = dict(settings)
+    obj.update(snapshot)
+    obj["record_id"] = record_id
+    obj["synced"] = _kst_stamp()
+    # 너무 크면 대조용 생기부 → 문단 순서로 줄입니다.
+    for cut in (15000, 9000, 5000, 2500):
+        obj["record"] = str(snapshot.get("record", ""))[:cut]
+        if len(json.dumps(obj, ensure_ascii=False)) <= _ROW_TOTAL:
+            break
+    while len(json.dumps(obj, ensure_ascii=False)) > _ROW_TOTAL and any(len(q["para"]) > 150 for q in obj["qs"]):
+        for q in obj["qs"]:
+            q["para"] = q["para"][:150]
+    return _save_json_row(f"{STU_PREFIX}{_bundle_key(record_id)}.{token}", name, uni, major, "학생링크", obj)
+
+
+def load_answers(record_id):
+    _, obj = _load_json_row(f"{ANS_PREFIX}{_bundle_key(record_id)}")
+    obj.setdefault("q", {})
+    obj.setdefault("usage", {})
+    return obj
+
+
+def _prune_answers(ans):
+    """저장 칸이 넘치지 않게, 오래된 첨삭의 긴 글부터 줄입니다(점수는 남김)."""
+    def size():
+        return len(json.dumps(ans, ensure_ascii=False))
+    steps = [
+        lambda t, last: [t["fb"].pop(k, None) for k in ("better", "good", "transcript")] if not last else None,
+        lambda t, last: [f.get("fb", {}).pop(k, None) for f in t.get("follow", []) for k in ("better", "good", "fixes")] if not last else None,
+        lambda t, last: t["fb"].pop("fixes", None) if not last else None,
+        lambda t, last: t.__setitem__("text", t.get("text", "")[:200]) if not last else None,
+    ]
+    for step in steps:
+        if size() <= _ROW_TOTAL - 2000:
+            return ans
+        for item in ans.get("q", {}).values():
+            tries = item.get("tries", [])
+            for i, t in enumerate(tries):
+                t.setdefault("fb", {})
+                step(t, i == len(tries) - 1)
+    for item in ans.get("q", {}).values():          # 그래도 넘치면 오래된 시도를 덜어냄
+        if size() <= _ROW_TOTAL - 2000:
+            break
+        item["tries"] = item.get("tries", [])[-3:]
+    days = sorted(ans.get("usage", {}))
+    ans["usage"] = {d: ans["usage"][d] for d in days[-7:]}
+    return ans
+
+
+def save_answers(record_id, name, uni, major, ans, owner=""):
+    ans["owner"] = owner or ans.get("owner", "")
+    ans["record_id"] = record_id
+    ans["updated"] = _kst_stamp()
+    return _save_json_row(f"{ANS_PREFIX}{_bundle_key(record_id)}", name, uni, major, "학생답안", _prune_answers(ans))
+
+
+def load_comments(record_id):
+    _, obj = _load_json_row(f"{CMT_PREFIX}{_bundle_key(record_id)}")
+    obj.setdefault("c", {})
+    return obj
+
+
+def save_comments(record_id, name, uni, major, obj):
+    return _save_json_row(f"{CMT_PREFIX}{_bundle_key(record_id)}", name, uni, major, "교사코멘트", obj)
+
+
+def _app_base_url():
+    try:
+        u = st.secrets.get("APP_URL")
+        if u:
+            return str(u).rstrip("/")
+    except Exception:
+        pass
+    try:
+        from urllib.parse import urlsplit
+        p = urlsplit(str(st.context.url))
+        if p.scheme and p.netloc:
+            return f"{p.scheme}://{p.netloc}{p.path}".rstrip("/")
+    except Exception:
+        pass
+    return ""
+
+
+def _qr_png(url):
+    try:
+        import qrcode
+        buf = io.BytesIO()
+        qrcode.make(url).save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------- AI 첨삭
+def call_gemini_parts(contents, api_key, json_mode=True):
+    """음성처럼 글이 아닌 자료를 함께 보낼 때 쓰는 호출."""
+    client = genai.Client(api_key=api_key)
+    models = []
+    try:
+        for m in client.models.list():
+            name = m.name.replace("models/", "") if m.name.startswith("models/") else m.name
+            if "gemini-1.5" in name or "gemini-flash" in name:
+                models.append(name)
+    except Exception:
+        pass
+    if not models:
+        models = ["gemini-flash-latest", "gemini-1.5-flash"]
+    models = sorted(models, key=lambda x: "flash" not in x)
+    cfg = types.GenerateContentConfig(response_mime_type="application/json") if json_mode else None
+    last = ""
+    for target in models[:3]:
+        try:
+            return client.models.generate_content(model=target, contents=contents, config=cfg).text
+        except Exception as e:
+            last = str(e)
+            time.sleep(2)
+    raise Exception(f"AI 모델 통신 실패 (마지막 에러: {last})")
+
+
+def build_feedback_prompt(ctx, answer, sec=None, follow=None, voice=False):
+    """ctx: {q, quote, para, record, uni, major}. follow: {q, prev}이면 꼬리질문에 대한 답 첨삭."""
+    if follow:
+        qblock = f"[원래 질문] {ctx['q']}\n    [학생의 앞선 답변] {follow['prev']}\n    [꼬리질문] {follow['q']}\n    (학생은 꼬리질문에 답했습니다. 꼬리질문에 대한 답을 첨삭하세요.)"
+    else:
+        qblock = f"[질문] {ctx['q']}"
+    ans_block = "[학생 답변] 함께 보낸 음성 파일입니다. 먼저 학생이 말한 그대로 받아 적으세요." if voice else f"[학생 답변]\n    {answer}"
+    time_note = f"\n    [말한 시간] {sec}초 (권장 40~60초)" if sec else ""
+    return f"""당신은 {ctx['uni']} {ctx['major']} 학생부종합전형 면접관이자, 고등학생을 지도하는 면접 코치입니다.
+    학생의 답변을 첨삭하세요. 학생에게 직접 말하듯 친절하지만 구체적으로 쓰세요.
+
+    {qblock}
+    [근거 문장(생기부)] {ctx['quote']}
+    [근거 문단] {ctx['para']}
+    {ans_block}{time_note}
+
+    평가 기준(각 1~5점, 5가 가장 좋음):
+    - 근거: 생기부 속 활동을 근거로 들었는가
+    - 구조: 결론을 먼저 말하고 근거 → 배운 점 순서로 말했는가
+    - 구체성: 과정·맡은 역할·수치가 구체적인가
+    - 전공연결: {ctx['major']}·진로와 자연스럽게 이어지는가
+    JSON 하나만 출력하세요:
+    {{"받아쓰기": "...", "점수": {{"근거": 3, "구조": 3, "구체성": 3, "전공연결": 3}}, "잘한 점": "...", "고칠 점": ["...", "..."], "다듬은 답안": "...", "생기부와 다른 내용": ["..."], "꼬리질문": "..."}}
+    규칙:
+    1. "받아쓰기"는 음성 답변일 때만 학생이 말한 그대로 적고, 글 답변이면 빈 문자열로 두세요.
+    2. "고칠 점"은 2~3개, 무엇을 어떻게 바꾸면 되는지 한 문장씩 쓰세요.
+    3. "다듬은 답안"은 학생 답변의 내용과 말투를 살려 40~60초 분량으로 다듬되, 생기부에 없는 사실을 새로 넣지 마세요. 학생이 채워야 할 곳은 [본인 경험: …]으로 표시하세요.
+    4. "생기부와 다른 내용"에는 학생 답변 중 아래 [생기부]에 없거나 어긋나는 사실(활동, 역할, 수치, 책 제목, 결과)만 학생 말 그대로 인용하세요. 느낌·생각·다짐은 넣지 마세요. 없으면 빈 목록입니다.
+    5. "꼬리질문"은 이 답변을 듣고 면접관이 바로 이어서 물을 질문 하나입니다.
+    6. 답변이 너무 짧거나 질문과 상관없으면 점수를 낮게 주고, '고칠 점'에 무엇을 말해야 하는지 알려 주세요.
+
+    [생기부]
+    {ctx['record']}
+    """
+
+
+def _as_list(x):
+    if isinstance(x, list):
+        return [str(v).strip() for v in x if str(v).strip()]
+    x = str(x or "").strip()
+    return [x] if x else []
+
+
+def normalize_feedback(raw):
+    obj = next((o for o in _extract_json_objects(raw) if isinstance(o.get("점수"), dict)), None)
+    if not obj:
+        return None
+    scores = {}
+    for k in FB_CRITERIA:
+        try:
+            v = int(round(float(obj["점수"].get(k, 1))))
+        except Exception:
+            v = 1
+        scores[k] = max(1, min(5, v))
+    return {
+        "scores": scores, "total": sum(scores.values()),
+        "good": str(obj.get("잘한 점", "")).strip(), "fixes": _as_list(obj.get("고칠 점")),
+        "better": str(obj.get("다듬은 답안", "")).strip(), "mismatch": _as_list(obj.get("생기부와 다른 내용")),
+        "follow": str(obj.get("꼬리질문", "")).strip(), "transcript": str(obj.get("받아쓰기", "")).strip(),
+    }
+
+
+def run_feedback(ctx, api_key, answer="", audio=None, sec=None, follow=None):
+    """글 또는 음성 답변을 첨삭합니다. 실패하면 (None, 이유)."""
+    try:
+        if audio is not None:
+            prompt = build_feedback_prompt(ctx, "", sec=sec, follow=follow, voice=True)
+            parts = [types.Part.from_bytes(data=audio, mime_type="audio/wav"), prompt]
+            try:
+                raw = call_gemini_parts(parts, api_key)
+            except Exception as e:
+                if not _RATE_LIMIT_RX.search(str(e)):
+                    raise
+                time.sleep(25)
+                raw = call_gemini_parts(parts, api_key)
+        else:
+            raw = _call_gemini_retry(build_feedback_prompt(ctx, answer, follow=follow), api_key, json_mode=True)
+    except Exception as e:
+        return None, _friendly_error(e)
+    fb = normalize_feedback(raw)
+    if not fb:
+        return None, "AI 첨삭 결과를 읽지 못했습니다. 다시 시도해 주세요."
+    return fb, ""
+
+
+def _wav_seconds(data):
+    try:
+        with _wave.open(io.BytesIO(data)) as w:
+            return int(round(w.getnframes() / float(w.getframerate())))
+    except Exception:
+        return None
+
+
+def _timer_html(seconds=60):
+    return f"""
+<div style="font-family:Pretendard,sans-serif;display:flex;gap:10px;align-items:center">
+  <button id="tbtn" style="padding:6px 14px;border-radius:8px;border:1px solid #888;background:#fff;cursor:pointer">⏱️ {seconds}초 타이머 시작</button>
+  <span id="tleft" style="font-size:1.4rem;font-weight:700">{seconds}</span><span>초</span>
+</div>
+<script>
+let t=null;const b=document.getElementById('tbtn'),l=document.getElementById('tleft');
+b.onclick=()=>{{if(t)clearInterval(t);let s={seconds};l.style.color='';l.textContent=s;
+t=setInterval(()=>{{s--;l.textContent=s;if(s<=15)l.style.color='#e65100';if(s<=0){{clearInterval(t);l.style.color='#c62828';l.textContent='끝';}}}},1000);}};
+</script>"""
+
+
+def _score_bar_md(scores):
+    return "  \n".join(f"{k} {'●' * v}{'○' * (5 - v)} {v}/5" for k, v in scores.items())
+
+
+def _render_feedback(fb, prev_total=None, compact=False):
+    if not fb:
+        return
+    delta = None if prev_total is None else fb["total"] - prev_total
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.metric("첨삭 점수", f"{fb['total']}/20", delta=(f"{delta:+d}" if delta else None))
+    with c2:
+        st.markdown(_score_bar_md(fb["scores"]))
+    if fb.get("mismatch"):
+        st.warning("⚠️ **생기부와 다른 내용이 있어요.** 면접관이 확인하면 곤란할 수 있으니 고치거나 선생님께 확인하세요.  \n"
+                   + "  \n".join(f"· “{_md_safe(m)}”" for m in fb["mismatch"]))
+    if fb.get("good") and not compact:
+        st.markdown(f"**👍 잘한 점** {_md_safe(fb['good'])}")
+    if fb.get("fixes"):
+        st.markdown("**🔧 고칠 점**  \n" + "  \n".join(f"{i}. {_md_safe(x)}" for i, x in enumerate(fb["fixes"], 1)))
+    if fb.get("better") and not compact:
+        with st.expander("✨ 다듬은 답안 보기"):
+            st.markdown(_md_safe(fb["better"]))
+    if fb.get("transcript") and not compact:
+        with st.expander("🗣️ 내가 말한 내용 (받아쓰기)"):
+            st.markdown(_md_safe(fb["transcript"]))
+
+
+# ---------------------------------------------------------------- 학생 화면
+def _student_api_key():
+    try:
+        return st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        return ""
+
+
+def render_student_page(s_param):
+    """학생이 링크로 들어왔을 때의 화면. 선생님 화면·다른 학생 기록에는 접근하지 않습니다."""
+    sid = re.sub(r"[^A-Za-z0-9._-]", "", str(s_param))[:80]
+    link_key = f"stu_link_{sid}"
+    if link_key not in st.session_state or st.session_state.get(f"stu_reload_{sid}"):
+        st.session_state.pop(f"stu_reload_{sid}", None)
+        row, obj = _load_json_row(f"{STU_PREFIX}{sid}")
+        st.session_state[link_key] = (dict(row) if row else None, obj)
+    row, link = st.session_state[link_key]
+    if not row or not link.get("record_id") or not link.get("qs"):
+        st.error("링크가 올바르지 않거나, 선생님이 연습을 끝냈습니다. 선생님께 새 링크를 받아 주세요.")
+        st.stop()
+    name = str(_row_get(row, "student_name", ""))
+    uni = str(_row_get(row, "university", ""))
+    major = str(_row_get(row, "major", ""))
+    record_id = link["record_id"]
+
+    st.markdown(f"## 📱 {name} 학생 면접 연습")
+    st.caption(f"{uni} · {major}")
+
+    ok_key = f"stu_ok_{sid}"
+    if not st.session_state.get(ok_key):
+        locked = st.session_state.get(f"stu_lock_{sid}", 0)
+        if time.time() < locked:
+            st.error(f"PIN을 여러 번 틀렸습니다. {int(locked - time.time()) + 1}초 뒤에 다시 시도해 주세요.")
+            st.stop()
+        with st.form("stu_pin_form"):
+            pin = st.text_input("선생님께 받은 PIN 4자리", type="password", max_chars=4)
+            go = st.form_submit_button("시작하기", use_container_width=True)
+        if go:
+            if hmac.compare_digest(str(pin or "").strip().encode(), str(link.get("pin", "")).encode()):
+                st.session_state[ok_key] = True
+                st.session_state[f"stu_fail_{sid}"] = 0
+                st.rerun()
+            fails = st.session_state.get(f"stu_fail_{sid}", 0) + 1
+            st.session_state[f"stu_fail_{sid}"] = fails
+            if fails >= 5:
+                st.session_state[f"stu_lock_{sid}"] = time.time() + 60
+                st.session_state[f"stu_fail_{sid}"] = 0
+            time.sleep(1)
+            st.error("PIN이 맞지 않습니다.")
+        st.stop()
+
+    api_key = _student_api_key()
+    ans_key, cmt_key = f"stu_ans_{sid}", f"stu_cmt_{sid}"
+    if ans_key not in st.session_state:
+        st.session_state[ans_key] = load_answers(record_id)
+        st.session_state[cmt_key] = load_comments(record_id)
+    ans, cmts = st.session_state[ans_key], st.session_state[cmt_key]
+    limit = int(link.get("limit", STU_DAILY_LIMIT) or STU_DAILY_LIMIT)
+    used = int(ans["usage"].get(_kst_today(), 0))
+    qs = link["qs"]
+
+    top1, top2 = st.columns([3, 1], vertical_alignment="center")
+    with top1:
+        done = sum(1 for q in qs if ans["q"].get(q["key"], {}).get("tries"))
+        st.progress(done / len(qs) if qs else 0.0, text=f"답한 질문 {done}/{len(qs)} · 오늘 첨삭 {used}/{limit}회")
+    with top2:
+        if st.button("🔄 새로고침", use_container_width=True, help="선생님 코멘트와 새 질문을 다시 불러옵니다."):
+            for k in (ans_key, cmt_key):
+                st.session_state.pop(k, None)
+            st.session_state[f"stu_reload_{sid}"] = True
+            st.rerun()
+    if not storage_is_shared():
+        st.warning("⚠️ 이 앱은 아직 구글시트 저장이 연결되지 않아, 답안이 선생님께 전달되지 않을 수 있습니다.")
+    if not api_key:
+        st.error("AI 첨삭 설정이 되어 있지 않습니다. 선생님께 알려 주세요.")
+
+    tab_practice, tab_record = st.tabs(["📝 질문 연습", "📈 내 기록"])
+    with tab_practice:
+        _student_practice_tab(sid, link, ans, cmts, name, uni, major, record_id, api_key, limit)
+    with tab_record:
+        _student_record_tab(qs, ans)
+
+
+def _student_ctx(link, q, uni, major):
+    return {"q": q["q"], "quote": q["quote"], "para": q["para"], "record": link.get("record", ""),
+            "uni": uni, "major": major}
+
+
+def _student_save(sid, record_id, name, uni, major, ans, owner):
+    try:
+        save_answers(record_id, name, uni, major, ans, owner=owner)
+        return True
+    except Exception as e:
+        st.error(f"답안을 저장하지 못했습니다: {e}")
+        return False
+
+
+def _student_practice_tab(sid, link, ans, cmts, name, uni, major, record_id, api_key, limit):
+    qs = link["qs"]
+    owner = link.get("owner", "")
+    flt = st.radio("보기", ["전체", "아직 안 한 질문", "다시 볼 질문"], horizontal=True, key=f"stu_flt_{sid}",
+                   label_visibility="collapsed")
+
+    def needs_review(q):
+        tries = ans["q"].get(q["key"], {}).get("tries", [])
+        if not tries:
+            return False
+        fb = tries[-1].get("fb", {})
+        return fb.get("total", 20) < 14 or bool(fb.get("mismatch")) or q["key"] in cmts["c"]
+
+    if flt == "아직 안 한 질문":
+        view = [q for q in qs if not ans["q"].get(q["key"], {}).get("tries")]
+    elif flt == "다시 볼 질문":
+        view = [q for q in qs if needs_review(q)]
+    else:
+        view = list(qs)
+    if not view:
+        st.info("이 보기에 해당하는 질문이 없습니다.")
+        return
+
+    def label(q):
+        tries = ans["q"].get(q["key"], {}).get("tries", [])
+        mark = f"✅ {tries[-1].get('fb', {}).get('total', '-')}점" if tries else "⬜"
+        cm = " 💬" if q["key"] in cmts["c"] else ""
+        return f"{mark}{cm} {q['no']}. {q['q'][:34]}{'…' if len(q['q']) > 34 else ''}"
+
+    keys = [q["key"] for q in view]
+    sel_key = f"stu_sel_{sid}_{flt}"
+    if st.session_state.get(sel_key) not in keys:
+        st.session_state[sel_key] = keys[0]
+
+    def move(step):
+        i = keys.index(st.session_state[sel_key])
+        st.session_state[sel_key] = keys[(i + step) % len(keys)]
+
+    st.selectbox("질문 고르기", keys, key=sel_key, format_func=lambda k: label(next(q for q in view if q["key"] == k)))
+    n1, n2 = st.columns(2)
+    n1.button("◀ 이전 질문", use_container_width=True, on_click=move, args=(-1,), key=f"stu_prev_{sid}")
+    n2.button("다음 질문 ▶", use_container_width=True, on_click=move, args=(1,), key=f"stu_next_{sid}")
+
+    q = next(x for x in view if x["key"] == st.session_state[sel_key])
+    item = ans["q"].setdefault(q["key"], {"q": q["q"], "tries": []})
+    item["q"] = q["q"]
+    tries = item["tries"]
+    used = int(ans["usage"].get(_kst_today(), 0))
+    over = used >= limit
+    ctx = _student_ctx(link, q, uni, major)
+
+    with st.container(border=True):
+        st.markdown(f"#### {q['no']}. {_md_safe(q['q'])}")
+        st.caption(f"📂 {q['area']} · 근거 “{_md_safe(q['quote'])}”")
+        if q["key"] in cmts["c"]:
+            c = cmts["c"][q["key"]]
+            st.info(f"👩‍🏫 **선생님 코멘트** ({c.get('at', '')})  \n{_md_safe(c.get('text', ''))}")
+
+        mode = st.radio("답하는 방법", ["✍️ 글로 답하기", "🎙️ 말로 답하기"], horizontal=True, key=f"stu_mode_{sid}")
+        if over:
+            st.warning(f"오늘 첨삭을 {limit}회 모두 썼습니다. 내일 다시 할 수 있어요. 답을 다듬어 두고 내일 첨삭받아 보세요.")
+        submitted, payload = False, {}
+        if mode.startswith("✍️"):
+            txt = st.text_area("내 답변", key=f"stu_txt_{sid}_{q['key']}", height=200,
+                               placeholder="결론부터 말해 보세요. 예) 저는 ~했습니다. 그 과정에서 ~. 이를 통해 ~를 배웠습니다.")
+            st.caption(f"{len(txt)}자 · 말하면 약 {max(1, round(len(txt) / 6))}초 (권장 40∼60초, 240∼360자)")
+            submitted = st.button("📝 첨삭 받기", type="primary", use_container_width=True,
+                                  disabled=over or not api_key, key=f"stu_go_{sid}_{q['key']}")
+            if submitted and len(txt.strip()) < 20:
+                st.warning("답변을 조금 더 써 주세요(20자 이상).")
+                submitted = False
+            payload = {"answer": txt.strip()}
+        else:
+            import streamlit.components.v1 as _components
+            _components.html(_timer_html(60), height=50)
+            audio = st.audio_input("녹음 버튼을 누르고 답해 보세요", key=f"stu_aud_{sid}_{q['key']}")
+            data = audio.getvalue() if audio is not None else None
+            sec = _wav_seconds(data) if data else None
+            if sec:
+                note = "적당해요" if 40 <= sec <= 70 else ("조금 짧아요" if sec < 40 else "조금 길어요")
+                st.caption(f"녹음 길이 {sec}초 — {note} (권장 40∼60초)")
+            submitted = st.button("📝 첨삭 받기", type="primary", use_container_width=True,
+                                  disabled=over or not api_key, key=f"stu_go_a_{sid}_{q['key']}")
+            if submitted and not data:
+                st.warning("먼저 녹음 버튼을 눌러 답을 녹음해 주세요.")
+                submitted = False
+            payload = {"audio": data, "sec": sec}
+        if submitted:
+            with st.spinner("AI 선생님이 답변을 읽고 있어요... (10~30초)"):
+                fb, err = run_feedback(ctx, api_key, answer=payload.get("answer", ""),
+                                       audio=payload.get("audio"), sec=payload.get("sec"))
+            if fb:
+                tries.append({"at": _kst_stamp(), "mode": "말" if payload.get("audio") else "글",
+                              "text": payload.get("answer") or fb.get("transcript", ""), "sec": payload.get("sec"),
+                              "fb": fb, "follow": []})
+                ans["usage"][_kst_today()] = used + 1
+                _student_save(sid, record_id, name, uni, major, ans, owner)
+                st.rerun()
+            else:
+                st.error(err)
+
+    if not tries:
+        st.caption("답을 한 번 첨삭받으면 모범답안을 볼 수 있어요. 먼저 스스로 답해 보세요!")
+        return
+
+    last = tries[-1]
+    prev_total = tries[-2]["fb"].get("total") if len(tries) > 1 else None
+    with st.container(border=True):
+        st.markdown(f"**🧾 {len(tries)}차 첨삭 결과** · {last.get('at', '')} · {last.get('mode', '글')}로 답함"
+                    + (f" · {last['sec']}초" if last.get("sec") else ""))
+        _render_feedback(last.get("fb"), prev_total)
+        st.caption("고칠 점을 반영해 위에서 다시 답하면 다음 차수로 쌓입니다.")
+
+    # 꼬리질문 이어 답하기
+    follows = last.setdefault("follow", [])
+    for i, f in enumerate(follows, 1):
+        with st.container(border=True):
+            st.markdown(f"**🔥 꼬리질문 {i}.** {_md_safe(f['q'])}")
+            st.markdown(f"> {_md_safe(f.get('a', ''))}")
+            _render_feedback(f.get("fb"), compact=True)
+    next_q = (follows[-1].get("fb", {}).get("follow") if follows else last.get("fb", {}).get("follow")) or ""
+    if next_q and len(follows) < FOLLOW_MAX:
+        with st.container(border=True):
+            st.markdown(f"**🔥 꼬리질문 {len(follows) + 1}.** {_md_safe(next_q)}")
+            fa = st.text_area("이어서 답하기", key=f"stu_fa_{sid}_{q['key']}_{len(tries)}_{len(follows)}", height=130)
+            f_go = st.button("📝 꼬리질문 첨삭 받기", use_container_width=True, disabled=over or not api_key,
+                             key=f"stu_fgo_{sid}_{q['key']}_{len(tries)}_{len(follows)}")
+            if f_go and len(fa.strip()) < 10:
+                st.warning("답변을 조금 더 써 주세요(10자 이상).")
+                f_go = False
+            if f_go:
+                prev = follows[-1].get("a", "") if follows else last.get("text", "")
+                with st.spinner("꼬리질문 답변을 읽고 있어요..."):
+                    fb, err = run_feedback(ctx, api_key, answer=fa.strip(), follow={"q": next_q, "prev": prev})
+                if fb:
+                    follows.append({"q": next_q, "a": fa.strip(), "fb": fb, "at": _kst_stamp()})
+                    ans["usage"][_kst_today()] = used + 1
+                    _student_save(sid, record_id, name, uni, major, ans, owner)
+                    st.rerun()
+                else:
+                    st.error(err)
+    elif follows and len(follows) >= FOLLOW_MAX:
+        st.success("꼬리질문 3단계까지 모두 답했어요! 실제 면접에서도 이렇게 이어서 물어봅니다.")
+
+    with st.expander("✅ 모범답안 보기"):
+        if q.get("answer"):
+            st.markdown(_md_safe(q["answer"]))
+        else:
+            st.caption("선생님이 아직 이 질문의 모범답안을 올리지 않았어요. 위의 '다듬은 답안'을 참고하세요.")
+        if q.get("tail"):
+            st.markdown(f"**🔥 예상 꼬리질문** {_md_safe(q['tail'])}")
+        if q.get("guide"):
+            st.caption("답변 가이드: " + q["guide"])
+
+    if len(tries) > 1:
+        with st.expander(f"🕘 지난 답변 {len(tries) - 1}개"):
+            for i, t in enumerate(tries[:-1], 1):
+                st.markdown(f"**{i}차** · {t.get('at', '')} · {t.get('fb', {}).get('total', '-')}점")
+                st.caption(t.get("text", "")[:400])
+
+
+def _student_record_tab(qs, ans):
+    rows, firsts, lasts = [], [], []
+    for q in qs:
+        tries = ans["q"].get(q["key"], {}).get("tries", [])
+        if not tries:
+            continue
+        f, l = tries[0].get("fb", {}), tries[-1].get("fb", {})
+        if f.get("scores"):
+            firsts.append(f["scores"])
+        if l.get("scores"):
+            lasts.append(l["scores"])
+        rows.append({"질문": f"{q['no']}. {q['q'][:30]}", "시도": len(tries),
+                     "처음": f.get("total"), "최근": l.get("total"),
+                     "꼬리질문": len(tries[-1].get("follow", [])), "생기부와 다름": "⚠️" if l.get("mismatch") else ""})
+    if not rows:
+        st.info("아직 첨삭받은 답변이 없어요. '질문 연습'에서 첫 답변을 써 보세요.")
+        return
+    avg = lambda lst, k: round(sum(s[k] for s in lst) / len(lst), 1) if lst else 0
+    m1, m2, m3 = st.columns(3)
+    m1.metric("답한 질문", f"{len(rows)}/{len(qs)}")
+    m2.metric("평균 점수(최근)", f"{round(sum(r['최근'] or 0 for r in rows) / len(rows), 1)}/20")
+    m3.metric("첨삭 횟수", sum(r["시도"] for r in rows))
+    chart = pd.DataFrame({"처음": [avg(firsts, k) for k in FB_CRITERIA], "최근": [avg(lasts, k) for k in FB_CRITERIA]},
+                         index=FB_CRITERIA)
+    st.markdown("**기준별 평균 (5점 만점)**")
+    st.bar_chart(chart, stack=False, height=240, horizontal=True)
+    weak = min(FB_CRITERIA, key=lambda k: avg(lasts, k))
+    st.caption(f"가장 보완할 점: **{weak}** — {FB_CRITERIA_HELP[weak]}")
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
+# ---------------------------------------------------------------- 선생님: 기록별 링크·현황판
+def render_teacher_practice(hl, student_name, uni, major):
+    record_id = st.session_state.get("current_record_id")
+    st.markdown("### 📱 학생 연습 — 휴대폰·패드로 답변 받기")
+    if not record_id:
+        st.caption("기록을 먼저 저장하면 학생 링크를 만들 수 있습니다.")
+        return
+    if not storage_is_shared():
+        st.warning("⚠️ 구글시트 저장이 설정되지 않아, 학생 기기에서 쓴 답안이 선생님 화면과 공유되지 않습니다. "
+                   "구글시트(Apps Script) 연동 후 사용해 주세요.")
+    cache = st.session_state.setdefault("tp_cache", {})
+    ck = _bundle_key(record_id)
+    reload = st.session_state.pop("tp_reload", False)
+    if ck not in cache or reload:
+        links = practice_link_rows(record_id)
+        link_row, link = (None, {})
+        if links:
+            link_row, link = _load_json_row(_row_get(links[0], "id", ""))
+        cache[ck] = {"link_id": _row_get(links[0], "id", "") if links else None, "link": link,
+                     "ans": load_answers(record_id), "cmt": load_comments(record_id)}
+    data = cache[ck]
+    link, link_id = data["link"], data["link_id"]
+
+    def snapshot():
+        return practice_snapshot(hl, st.session_state.get("last_result_text", ""),
+                                 st.session_state.get("loaded_student_record_text", ""), student_name)
+
+    with st.container(border=True):
+        if not link_id:
+            st.markdown("학생이 휴대폰이나 패드로 자기 질문에 답하고 AI 첨삭을 받을 수 있는 **전용 링크**를 만듭니다. "
+                        "학생 화면에는 질문·근거 문장·모범답안만 가고, 학생 이름은 가려서 AI로 보냅니다.")
+            lim = st.number_input("학생 하루 첨삭 횟수", 5, 200, STU_DAILY_LIMIT, step=5, key="tp_limit_new")
+            if st.button("📱 학생용 링크 만들기", type="primary", key="tp_make"):
+                token = _pysecrets.token_urlsafe(9).replace("-", "x").replace("_", "y")
+                pin = f"{_pysecrets.randbelow(10000):04d}"
+                try:
+                    save_student_link(token, record_id, student_name, uni, major,
+                                      {"pin": pin, "limit": int(lim), "owner": current_teacher() or "",
+                                       "created": _kst_stamp()}, snapshot())
+                    st.session_state["tp_reload"] = True
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"링크를 만들지 못했습니다: {e}")
+        else:
+            s_param = link_id[len(STU_PREFIX):]
+            base = _app_base_url()
+            url = f"{base}/?s={s_param}" if base else f"(앱 주소)/?s={s_param}"
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                st.markdown(f"**학생 링크** · PIN **{link.get('pin', '????')}** · 하루 {link.get('limit', STU_DAILY_LIMIT)}회")
+                st.code(url, language=None)
+                if not base:
+                    st.caption("앱 주소를 알아내지 못했습니다. Secrets에 APP_URL = \"https://...streamlit.app\"을 넣으면 전체 주소가 나옵니다.")
+                st.caption(f"학생에게 보낸 질문 {len(link.get('qs', []))}개 · 마지막 보냄 {link.get('synced', '')}")
+            with c2:
+                png = _qr_png(url) if base else None
+                if png:
+                    st.image(png, caption="QR코드", width=140)
+            b1, b2, b3, b4 = st.columns(4)
+            settings = {k: link.get(k) for k in ("pin", "limit", "owner", "created")}
+            token = s_param.split(".", 1)[1] if "." in s_param else s_param
+            if b1.button("🔄 최신 질문 보내기", use_container_width=True, key="tp_sync",
+                         help="질문을 더 만들었거나 모범답안을 만든 뒤 누르면 학생 화면에 반영됩니다."):
+                try:
+                    save_student_link(token, record_id, student_name, uni, major, settings, snapshot())
+                    st.session_state["tp_reload"] = True
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"보내지 못했습니다: {e}")
+            if b2.button("🔢 PIN 바꾸기", use_container_width=True, key="tp_pin"):
+                settings["pin"] = f"{_pysecrets.randbelow(10000):04d}"
+                save_student_link(token, record_id, student_name, uni, major, settings,
+                                  {"qs": link.get("qs", []), "record": link.get("record", "")})
+                st.session_state["tp_reload"] = True
+                st.rerun()
+            new_lim = b3.number_input("하루 횟수", 5, 200, int(link.get("limit", STU_DAILY_LIMIT)), step=5,
+                                      key="tp_limit", label_visibility="collapsed")
+            if new_lim != int(link.get("limit", STU_DAILY_LIMIT)):
+                settings["limit"] = int(new_lim)
+                save_student_link(token, record_id, student_name, uni, major, settings,
+                                  {"qs": link.get("qs", []), "record": link.get("record", "")})
+                st.session_state["tp_reload"] = True
+                st.rerun()
+            if b4.button("⛔ 링크 끊기", use_container_width=True, key="tp_cut",
+                         help="학생이 더 이상 들어올 수 없습니다. 답안 기록은 남고, 새 링크를 만들면 이어집니다."):
+                _delete_record_raw(link_id)
+                st.session_state["tp_reload"] = True
+                st.rerun()
+
+    render_practice_board(hl, record_id, student_name, uni, major, data)
+
+
+def render_practice_board(hl, record_id, student_name, uni, major, data):
+    ans, cmt = data["ans"], data["cmt"]
+    head1, head2 = st.columns([3, 1], vertical_alignment="center")
+    with head1:
+        st.markdown(f"**📋 학생 답안 현황판** · 마지막 활동 {ans.get('updated', '없음')}")
+    with head2:
+        if st.button("🔄 답안 새로고침", use_container_width=True, key="tp_refresh"):
+            st.session_state["tp_reload"] = True
+            st.rerun()
+    qmap = {q["key"]: (c, q) for c in hl.get("items", []) for q in c["qs"]}
+    answered = [k for k, v in ans["q"].items() if v.get("tries")]
+    if not answered:
+        st.caption("아직 학생이 첨삭받은 답변이 없습니다.")
+        return
+    lasts = [ans["q"][k]["tries"][-1].get("fb", {}) for k in answered]
+    mism = [k for k in answered if ans["q"][k]["tries"][-1].get("fb", {}).get("mismatch")]
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("답한 질문", f"{len(answered)}/{len(qmap) or len(answered)}")
+    m2.metric("평균 점수(최근)", f"{round(sum(f.get('total', 0) for f in lasts) / len(lasts), 1)}/20")
+    m3.metric("첨삭 횟수", sum(len(ans["q"][k]["tries"]) for k in answered))
+    m4.metric("⚠️ 생기부와 다름", len(mism))
+    crit = {k: round(sum(f.get("scores", {}).get(k, 0) for f in lasts) / len(lasts), 1) for k in FB_CRITERIA}
+    weak = min(crit, key=crit.get)
+    st.caption("기준별 평균: " + " · ".join(f"{k} {v}" for k, v in crit.items()) + f" — 가장 약한 기준: **{weak}**")
+
+    order = [k for k in qmap if k in answered] + [k for k in answered if k not in qmap]
+    for k in order:
+        item = ans["q"][k]
+        tries = item["tries"]
+        fb = tries[-1].get("fb", {})
+        no = qmap[k][1]["no"] if k in qmap else "-"
+        flag = " ⚠️" if fb.get("mismatch") else ""
+        cm = " 💬" if k in cmt["c"] else ""
+        with st.expander(f"{no}. {item.get('q', '')[:40]} — {len(tries)}회 · 최근 {fb.get('total', '-')}/20{flag}{cm}"):
+            t = tries[-1]
+            st.markdown(f"**최근 답변** ({t.get('at', '')}, {t.get('mode', '글')}"
+                        + (f", {t['sec']}초" if t.get("sec") else "") + ")")
+            st.markdown(f"> {_md_safe(t.get('text', ''))}")
+            _render_feedback(fb, tries[-2]["fb"].get("total") if len(tries) > 1 else None, compact=True)
+            for i, f in enumerate(t.get("follow", []), 1):
+                st.markdown(f"**꼬리질문 {i}.** {_md_safe(f['q'])}  \n> {_md_safe(f.get('a', ''))}  \n"
+                            f":gray[{f.get('fb', {}).get('total', '-')}/20]")
+            if len(tries) > 1:
+                st.caption("점수 변화: " + " → ".join(str(x.get("fb", {}).get("total", "-")) for x in tries))
+            cur = cmt["c"].get(k, {}).get("text", "")
+            txt = st.text_area("선생님 코멘트 (학생 화면 맨 위에 보입니다)", value=cur, key=f"tp_cmt_{k}", height=90)
+            if st.button("💬 코멘트 저장", key=f"tp_cmt_save_{k}"):
+                if txt.strip():
+                    cmt["c"][k] = {"text": txt.strip(), "at": _kst_stamp()}
+                else:
+                    cmt["c"].pop(k, None)
+                try:
+                    save_comments(record_id, student_name, uni, major, cmt)
+                    st.success("저장했습니다. 학생이 '새로고침'하면 보입니다.")
+                except Exception as e:
+                    st.error(f"저장하지 못했습니다: {e}")
+
+
+# ---------------------------------------------------------------- 선생님: 반 전체 통계·성장 리포트
+def practice_answer_rows():
+    """로그인한 교사가 볼 수 있는 학생 답안 줄 목록."""
+    try:
+        rows = _list_records_raw()
+    except Exception:
+        rows = []
+    return [r for r in rows if str(_row_get(r, "id", "")).startswith(ANS_PREFIX)]
+
+
+def load_class_practice():
+    out = []
+    for r in practice_answer_rows():
+        _, obj = _load_json_row(_row_get(r, "id", ""))
+        if not obj or not can_access_record(obj.get("record_id", "")):
+            continue
+        out.append({"name": str(_row_get(r, "student_name", "")), "uni": str(_row_get(r, "university", "")),
+                    "major": str(_row_get(r, "major", "")), "ans": obj})
+    return out
+
+
+def _practice_stats(ans):
+    items = [v for v in ans.get("q", {}).values() if v.get("tries")]
+    lasts = [v["tries"][-1].get("fb", {}) for v in items]
+    firsts = [v["tries"][0].get("fb", {}) for v in items]
+    if not items:
+        return None
+    avg = lambda fs, k: round(sum(f.get("scores", {}).get(k, 0) for f in fs) / len(fs), 2)
+    return {
+        "answered": len(items), "tries": sum(len(v["tries"]) for v in items),
+        "follow": sum(len(v["tries"][-1].get("follow", [])) for v in items),
+        "first_total": round(sum(f.get("total", 0) for f in firsts) / len(firsts), 1),
+        "last_total": round(sum(f.get("total", 0) for f in lasts) / len(lasts), 1),
+        "crit": {k: avg(lasts, k) for k in FB_CRITERIA},
+        "mismatch": sum(1 for f in lasts if f.get("mismatch")),
+        "updated": ans.get("updated", ""),
+    }
+
+
+def render_class_practice_stats():
+    with st.expander("📊 우리 반 학생 연습 현황 (휴대폰 답안 첨삭)", expanded=False):
+        if not storage_is_shared():
+            st.caption("구글시트 저장이 연결되어야 학생 기기의 답안을 모아 볼 수 있습니다.")
+        if st.button("📊 학생 연습 기록 불러오기", key="class_stats_load"):
+            with st.spinner("학생들의 답안 기록을 모으는 중입니다..."):
+                st.session_state["class_stats"] = load_class_practice()
+        data = st.session_state.get("class_stats")
+        if data is None:
+            st.caption("버튼을 누르면 학생들이 휴대폰으로 연습한 기록을 모아 보여 줍니다.")
+            return
+        rows, crits = [], []
+        for d in data:
+            s = _practice_stats(d["ans"])
+            if not s:
+                continue
+            crits.append(s["crit"])
+            rows.append({"학생": d["name"], "지원": f"{d['uni']} {d['major']}", "답한 질문": s["answered"],
+                         "첨삭": s["tries"], "꼬리질문": s["follow"], "처음 평균": s["first_total"],
+                         "최근 평균": s["last_total"], "향상": round(s["last_total"] - s["first_total"], 1),
+                         "가장 약한 기준": min(s["crit"], key=s["crit"].get), "⚠️ 생기부와 다름": s["mismatch"],
+                         "마지막 활동": s["updated"]})
+        if not rows:
+            st.info("아직 학생들이 첨삭받은 기록이 없습니다.")
+            return
+        cls = {k: round(sum(c[k] for c in crits) / len(crits), 2) for k in FB_CRITERIA}
+        weak = min(cls, key=cls.get)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("연습한 학생", len(rows))
+        m2.metric("반 평균 (최근)", f"{round(sum(r['최근 평균'] for r in rows) / len(rows), 1)}/20")
+        m3.metric("평균 향상", f"{round(sum(r['향상'] for r in rows) / len(rows), 1):+}점")
+        st.markdown("**기준별 반 평균 (5점 만점)**")
+        st.bar_chart(pd.DataFrame({"반 평균": [cls[k] for k in FB_CRITERIA]}, index=FB_CRITERIA), height=220, horizontal=True)
+        st.caption(f"우리 반이 가장 약한 기준은 **{weak}**({FB_CRITERIA_HELP[weak]})입니다. 다음 수업 주제로 삼아 보세요.")
+        st.dataframe(pd.DataFrame(rows).sort_values("최근 평균"), hide_index=True, use_container_width=True)
+
+
+def practice_summary_for_growth(student_name):
+    """성장 리포트에 넣을 '휴대폰 답안 연습' 요약 (그 학생 기록이 없으면 빈 문자열)."""
+    blocks = []
+    for d in load_class_practice():
+        if d["name"] != student_name:
+            continue
+        s = _practice_stats(d["ans"])
+        if not s:
+            continue
+        lines = [f"[{d['uni']} {d['major']}] 답한 질문 {s['answered']}개, 첨삭 {s['tries']}회, "
+                 f"평균 점수 처음 {s['first_total']} → 최근 {s['last_total']} (20점 만점), "
+                 f"기준별 최근 평균 " + ", ".join(f"{k} {v}" for k, v in s["crit"].items())
+                 + f", 생기부와 다른 내용이 지적된 답 {s['mismatch']}개"]
+        for v in list(d["ans"].get("q", {}).values())[:12]:
+            tries = v.get("tries", [])
+            if not tries:
+                continue
+            fixes = "; ".join(tries[-1].get("fb", {}).get("fixes", [])[:2])
+            lines.append(f"- {v.get('q', '')[:50]} | 점수 " + "→".join(str(t.get('fb', {}).get('total', '-')) for t in tries)
+                         + (f" | 최근 고칠 점: {fixes}" if fixes else ""))
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+# 학생 링크(?s=...)로 들어오면 교사 로그인 없이 그 학생 화면만 보여 주고 멈춥니다.
+_stu_param = st.query_params.get("s")
+if _stu_param:
+    render_student_page(_stu_param)
+    st.stop()
 
 require_login()
 
@@ -3911,6 +4861,8 @@ def _rec_get(row, key, default=""):
         return val if val not in (None, "") else default
     except (KeyError, IndexError):
         return default
+
+render_class_practice_stats()
 
 with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=False):
     saved_records = list_records()
@@ -4026,7 +4978,12 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                     target_name = target_row["student_name"] if target_row else None
                     matching = [r for r in saved_records if r.get("student_name") == target_name]
                     matching.sort(key=lambda r: r.get("updated_at", ""))
-                    if len(matching) < 2:
+                    with st.spinner("휴대폰 답안 연습 기록을 확인하는 중입니다..."):
+                        try:
+                            _practice_txt = practice_summary_for_growth(target_name)
+                        except Exception:
+                            _practice_txt = ""
+                    if len(matching) < 2 and not _practice_txt:
                         st.warning(f"'{target_name}' 학생은 저장된 기록이 {len(matching)}개뿐이라 성장 비교가 어렵습니다. 연습을 몇 번 더 진행한 뒤 다시 시도해 주세요.")
                     else:
                         with st.spinner(f"'{target_name}' 학생의 {len(matching)}개 회차 기록을 분석해 성장 리포트를 작성하는 중입니다..."):
@@ -4043,7 +5000,7 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                                     "chat_history": chat_hist,
                                 })
                             try:
-                                report_text = call_gemini(build_growth_report_prompt(target_name, sessions), api_key)
+                                report_text = call_gemini(build_growth_report_prompt(target_name, sessions, _practice_txt), api_key)
                                 report_path = create_growth_report_word(report_text, target_name)
                                 st.session_state.growth_report_file = report_path
                                 st.success(f"'{target_name}' 학생의 성장 리포트가 생성되었습니다.")
