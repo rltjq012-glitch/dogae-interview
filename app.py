@@ -2624,6 +2624,7 @@ def _norm_questions(it):
             "level": "심화" if "심화" in str(q.get("난이도", "")) else "기본",
             "guide": str(q.get("가이드", "") or q.get("준비", "")).strip(),
             "existing": _is_true(q.get("기존")),
+            "answer": str(q.get("모범답안", "") or "").strip(),
         })
     return out
 
@@ -2648,9 +2649,12 @@ def build_highlight_data(student_record_text, raw_items):
             ns_map.append(idx)
     nospace = "".join(nospace_chars)
 
-    keywords, cleaned, dropped = [], [], 0
+    keywords, cleaned, dropped, answers = [], [], 0, {}
     for idx, it in enumerate(raw_items or []):
         if not isinstance(it, dict):
+            continue
+        if isinstance(it.get("모범답안"), dict) and "구절" not in it:
+            answers.update({str(k): str(v) for k, v in it["모범답안"].items() if str(v).strip()})
             continue
         if it.get("키워드") and "구절" not in it:
             kw = it["키워드"]
@@ -2709,6 +2713,7 @@ def build_highlight_data(student_record_text, raw_items):
             q_no += 1
             q["no"] = q_no
             q["key"] = _qkey(q["q"])
+            q["answer"] = answers.get(q["key"]) or q.get("answer", "")
 
     count = {k: sum(1 for a in accepted if a["comp"] == k) for k in HL_COMPS}
     gaps, gap_areas = [], []
@@ -2766,6 +2771,7 @@ def set_highlight_state(hl, raw_items, student_name, target_desc):
     st.session_state.highlight_files = (
         create_highlight_word(hl, student_name, target_desc, is_teacher=False),
         create_highlight_word(hl, student_name, target_desc, is_teacher=True),
+        create_qa_sheet_word(hl, student_name, target_desc),
     )
 
 def run_explain_and_highlight(student_record, result_text, profile, uni_name, student_name, target_desc, api_key):
@@ -2843,6 +2849,70 @@ def add_more_questions(card_no, uni_name, major, profile, student_name, target_d
     set_highlight_state(build_highlight_data(st.session_state.get("loaded_student_record_text", ""), raw_items),
                         raw_items, student_name, target_desc)
     return True
+
+def answer_of(q):
+    """질문의 모범답안: 따로 만든 것 → 5세트 원문 순서로 찾습니다."""
+    return (q.get("answer") or (q.get("detail") or {}).get("모범답안") or "").strip()
+
+def build_answers_prompt(rows, uni_name, major):
+    lines = []
+    for r in rows:
+        lines.append(
+            f"- id: {r['id']}\n  질문: {r['q']}\n  근거 문장: {r['quote']}\n"
+            f"  문단: {r['para'][:400]}\n  가이드: {r['guide'] or '(없음)'}"
+        )
+    return f"""당신은 {uni_name} {major}에 지원하는 고등학생의 면접 코치입니다. 아래 질문마다 학생이 실제로 말할 모범답안을 쓰세요.
+    규칙:
+    1. 학생의 1인칭 구어체, 말했을 때 40~60초 분량(4~6문장)입니다.
+    2. 두괄식: 결론 → 근거(생기부 속 활동과 과정) → 배운 점이나 전공·진로와의 연결.
+    3. [근거 문장]과 [문단]에 있는 사실만 쓰세요. 없는 수치·책·활동·결과를 지어내지 마세요. 학생이 직접 채워야 할 부분은 [본인 경험: 무엇을 넣을지]처럼 대괄호로 표시하세요.
+    4. 가이드가 있으면 그 순서를 따르세요. 압박 질문은 약점을 인정한 뒤 배운 점과 보완 노력으로 답하세요.
+    JSON 하나만 출력하세요: {{"answers": [{{"id": "...", "모범답안": "..."}}]}}
+
+    [질문 목록]
+    {chr(10).join(lines)}
+    """
+
+def add_answers(qkeys, uni_name, major, student_name, target_desc, api_key):
+    """모범답안이 없는 질문에 모범답안을 만들어 붙입니다. 만든 개수를 돌려줍니다."""
+    hl = st.session_state.get("highlight_data") or {}
+    raw_items = list(st.session_state.get("highlight_raw_items") or [])
+    want = set(qkeys)
+    rows = []
+    for c in hl.get("items", []):
+        pa = hl["paras"][c["para"]]
+        for q in c["qs"]:
+            if q["key"] in want and not answer_of(q):
+                rows.append({"id": q["key"], "q": q["q"], "quote": c["quote"], "guide": q.get("guide", ""),
+                             "para": hl["text"][pa["start"]:pa["end"]]})
+    if not rows:
+        return 0
+    got = {}
+    try:
+        for i in range(0, len(rows), 10):          # 한 번에 10개씩 (응답이 잘리지 않게)
+            raw = _call_gemini_retry(build_answers_prompt(rows[i:i + 10], uni_name, major), api_key, json_mode=True)
+            for o in _extract_json_objects(raw):
+                for a in (o.get("answers") if isinstance(o.get("answers"), list) else [o]):
+                    if isinstance(a, dict) and a.get("id") and str(a.get("모범답안", "")).strip():
+                        got[str(a["id"]).strip()] = str(a["모범답안"]).strip()
+    except Exception as e:
+        st.session_state.highlight_notice = "모범답안을 만들지 못했습니다: " + _friendly_error(e)
+    got = {k: v for k, v in got.items() if k in want}
+    if not got:
+        if not st.session_state.get("highlight_notice"):
+            st.session_state.highlight_notice = "AI 응답에서 모범답안을 읽지 못했습니다. 다시 눌러 주세요."
+        return 0
+    idx = next((i for i, it in enumerate(raw_items)
+                if isinstance(it, dict) and isinstance(it.get("모범답안"), dict) and "구절" not in it), None)
+    if idx is None:
+        raw_items.append({"모범답안": got})
+    else:
+        merged = dict(raw_items[idx]["모범답안"])
+        merged.update(got)
+        raw_items[idx] = {"모범답안": merged}
+    set_highlight_state(build_highlight_data(st.session_state.get("loaded_student_record_text", ""), raw_items),
+                        raw_items, student_name, target_desc)
+    return len(got)
 
 def add_gap_cards(uni_name, profile, student_name, target_desc, api_key):
     """질문이 하나도 없는 영역에 카드를 더 만듭니다. 성공하면 True."""
@@ -3085,6 +3155,115 @@ def create_highlight_word(hl, student_name, target_desc, is_teacher=False):
     doc.save(path)
     return path
 
+def create_qa_sheet_word(hl, student_name, target_desc):
+    """질문만 모은 1부와 모범답안 2부로 된 연습지."""
+    from docx.enum.text import WD_BREAK
+    try:
+        unmatched_sets = attach_set_details(hl, st.session_state.get("last_result_text", ""))
+    except Exception:
+        unmatched_sets = []
+    rows = [(c, q) for c in hl["items"] for q in c["qs"]]
+    doc = Document()
+    set_document_font(doc)
+    doc.add_heading(f"❓ [{student_name}] {target_desc} 예상 질문 · 모범답안지", level=1)
+    doc.add_paragraph("1부는 질문만 있습니다. 먼저 소리 내어 답해 본 뒤 2부의 모범답안과 비교하세요.")
+    doc.add_heading("1부. 예상 질문", level=2)
+    last_area = None
+    for c, q in rows:
+        area = hl["paras"][c["para"]]["area"] or c["area_key"]
+        if area != last_area:
+            doc.add_heading(f"📂 {area}", level=3)
+            last_area = area
+        qp = doc.add_paragraph()
+        qp.paragraph_format.space_after = Pt(2)
+        qp.add_run(f"{q['no']}. ").bold = True
+        qp.add_run(q["q"])
+        tr = doc.add_paragraph().add_run(f"근거 {_marker(c['no'])} “{c['quote']}”  ·  {_q_tags(c, q)}     □ 자신 있음  □ 애매  □ 모름")
+        tr.font.size = Pt(8.5)
+        tr.font.color.rgb = RGBColor(0x75, 0x75, 0x75)
+    for d in unmatched_sets:
+        qp = doc.add_paragraph()
+        qp.add_run(f"5세트 {d['no']}번. ").bold = True
+        qp.add_run(re.sub(r"\s+", " ", d["질문"]))
+    doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+    doc.add_heading("2부. 모범답안", level=2)
+    for c, q in rows:
+        qp = doc.add_paragraph()
+        qp.paragraph_format.space_after = Pt(2)
+        qp.add_run(f"{q['no']}. {q['q']}").bold = True
+        ans = answer_of(q)
+        ap = doc.add_paragraph(ans if ans else "(아직 모범답안이 없습니다. 앱의 '질문만 보기'에서 모범답안을 만들 수 있습니다.)")
+        if not ans and q.get("guide"):
+            gr = doc.add_paragraph().add_run("답변 가이드: " + q["guide"])
+            gr.font.size = Pt(9)
+        tail = (q.get("detail") or {}).get("꼬리질문")
+        if tail:
+            tr = doc.add_paragraph().add_run("꼬리질문: " + re.sub(r"\s+", " ", tail))
+            tr.font.size = Pt(9)
+    for d in unmatched_sets:
+        qp = doc.add_paragraph()
+        qp.add_run(f"5세트 {d['no']}번. " + re.sub(r"\s+", " ", d["질문"])).bold = True
+        doc.add_paragraph(re.sub(r"\s+", " ", d.get("모범답안", "")))
+    path = _out_path(f"{student_name}_질문_모범답안지.docx")
+    doc.save(path)
+    return path
+
+def _render_question_only(hl, show, only_weak, checks, save_args, uni, major, student_name, target_desc, api_key):
+    """형광펜에서 나온 질문만 모아 보여 주고, 모범답안은 눌러야 보이게 합니다."""
+    all_rows = [(c, q) for c in hl["items"] for q in c["qs"]]
+    rows = [(c, q) for c, q in all_rows if show[c["comp"]]]
+    if only_weak:
+        rows = [(c, q) for c, q in rows if checks.get(q["key"]) in ("애매", "모름")]
+    missing = [q["key"] for _, q in all_rows if not answer_of(q)]
+    st.caption(f"질문 {len(rows)}개 — 모범답안은 '✅ 모범답안 보기'를 눌러야 보입니다. 먼저 소리 내어 답해 보세요.")
+    b1, b2 = st.columns([3, 2], vertical_alignment="center")
+    with b1:
+        if missing and st.button(f"✅ 모범답안 없는 {len(missing)}개 한 번에 만들기", key="hl_ans_all",
+                                 use_container_width=True, disabled=not api_key):
+            with st.spinner(f"모범답안 {len(missing)}개를 만드는 중입니다... (질문 10개당 30초 안팎)"):
+                if add_answers(missing, uni, major, student_name, target_desc, api_key):
+                    _quiet_save(save_args)
+            st.rerun()
+    with b2:
+        open_all = st.toggle("모범답안 모두 펼치기", key="hl_open_all")
+    with st.container(height=900, border=True):
+        if not rows:
+            st.info("보여줄 질문이 없습니다. 오른쪽에서 역량 선택이나 '애매·모름 질문만 보기'를 바꿔 보세요.")
+        last_area = None
+        for c, q in rows:
+            area = hl["paras"][c["para"]]["area"] or c["area_key"]
+            if area != last_area:
+                st.markdown(f"##### 📂 {area}")
+                last_area = area
+            with st.container(border=True):
+                pressure = " · ⚠️ 압박 대비" if q["type"] == "압박" else ""
+                st.markdown(
+                    f"**{q['no']}.** {_md_safe(q['q'])}  \n"
+                    f":gray[{HL_COMPS[c['comp']]['icon']} {_q_tags(c, q)}{pressure} · 근거 {_marker(c['no'])} “{_md_safe(c['quote'])}”]"
+                )
+                wkey = f"chk_{q['key']}"
+                cur = checks.get(q["key"], "미확인")
+                st.radio(
+                    "준비 상태", _CHECK_OPTS, horizontal=True, label_visibility="collapsed", key=wkey,
+                    index=_CHECK_OPTS.index(cur) if cur in _CHECK_OPTS else 0,
+                    on_change=_save_card_check, args=(q["key"], wkey, save_args),
+                )
+                with st.expander("✅ 모범답안 보기", expanded=open_all):
+                    ans = answer_of(q)
+                    if ans:
+                        st.markdown(_md_safe(ans))
+                    else:
+                        if q.get("guide"):
+                            st.caption("답변 가이드: " + q["guide"])
+                        if st.button("이 질문 모범답안 만들기", key=f"hl_ans_{q['key']}", disabled=not api_key):
+                            with st.spinner("모범답안을 만드는 중입니다..."):
+                                if add_answers([q["key"]], uni, major, student_name, target_desc, api_key):
+                                    _quiet_save(save_args)
+                            st.rerun()
+                    tail = (q.get("detail") or {}).get("꼬리질문")
+                    if tail:
+                        st.markdown(f"**🔥 꼬리질문**  \n{_md_safe(tail)}")
+
 def _para_html(text, start, end, cards, show_defend):
     import html as _html
     out, cur = [], start
@@ -3147,6 +3326,10 @@ def render_card_view(hl, student_name, uni, major, interview_type, difficulty, t
                     for k, v in rest:
                         st.markdown(f"**{k}**  \n{_md_safe(v)}")
 
+    qonly = st.radio(
+        "보기 방식", ["🖍️ 생기부에서 보기", "❓ 질문만 보기 (모범답안)"], horizontal=True,
+        key="hl_view", label_visibility="collapsed",
+    ).startswith("❓")
     left, right = st.columns([7, 3], gap="medium")
     with right:
         with st.container(border=True):
@@ -3210,56 +3393,61 @@ def render_card_view(hl, student_name, uni, major, interview_type, difficulty, t
                 st.markdown(" ".join(f"`{k}`" for k in hl["keywords"]))
 
     with left:
-        with st.container(height=900, border=True):
-            text, shown_any, last_area = hl["text"], False, None
-            for pi, pa in enumerate(hl["paras"]):
-                start, end = pa["start"], pa["end"]
-                if start == end:
-                    continue
-                cards = [c for c in hl["items"] if c["para"] == pi and show[c["comp"]]]
-                if only_weak:
-                    cards = [c for c in cards if any(checks.get(q["key"]) in ("애매", "모름") for q in c["qs"])]
-                if not cards and (only_marked or only_weak):
-                    continue
-                shown_any = True
-                if pa["area"] and pa["area"] != last_area:
-                    st.caption(f"📂 {pa['area']}")
-                    last_area = pa["area"]
-                st.markdown(_para_html(text, start, end, cards, show_def), unsafe_allow_html=True)
-                for c in cards:
-                    with st.container(border=True):
-                        for q in c["qs"]:
-                            if only_weak and checks.get(q["key"]) not in ("애매", "모름"):
-                                continue
-                            pressure = " · ⚠️ 압박 대비" if q["type"] == "압박" else ""
-                            st.markdown(
-                                f"**{q['no']}.** {_marker(c['no'])} {_md_safe(q['q'])}  \n"
-                                f":gray[{HL_COMPS[c['comp']]['icon']} {_q_tags(c, q)}{pressure}]"
-                            )
-                            chk_col, guide_col = st.columns([3, 1.4], vertical_alignment="center")
-                            with chk_col:
-                                wkey = f"chk_{q['key']}"
-                                cur = checks.get(q["key"], "미확인")
-                                st.radio(
-                                    "준비 상태", _CHECK_OPTS, horizontal=True, label_visibility="collapsed", key=wkey,
-                                    index=_CHECK_OPTS.index(cur) if cur in _CHECK_OPTS else 0,
-                                    on_change=_save_card_check, args=(q["key"], wkey, save_args),
+        if qonly:
+            _render_question_only(hl, show, only_weak, checks, save_args, uni, major, student_name, target_desc, api_key)
+        else:
+            with st.container(height=900, border=True):
+                text, shown_any, last_area = hl["text"], False, None
+                for pi, pa in enumerate(hl["paras"]):
+                    start, end = pa["start"], pa["end"]
+                    if start == end:
+                        continue
+                    cards = [c for c in hl["items"] if c["para"] == pi and show[c["comp"]]]
+                    if only_weak:
+                        cards = [c for c in cards if any(checks.get(q["key"]) in ("애매", "모름") for q in c["qs"])]
+                    if not cards and (only_marked or only_weak):
+                        continue
+                    shown_any = True
+                    if pa["area"] and pa["area"] != last_area:
+                        st.caption(f"📂 {pa['area']}")
+                        last_area = pa["area"]
+                    st.markdown(_para_html(text, start, end, cards, show_def), unsafe_allow_html=True)
+                    for c in cards:
+                        with st.container(border=True):
+                            for q in c["qs"]:
+                                if only_weak and checks.get(q["key"]) not in ("애매", "모름"):
+                                    continue
+                                pressure = " · ⚠️ 압박 대비" if q["type"] == "압박" else ""
+                                st.markdown(
+                                    f"**{q['no']}.** {_marker(c['no'])} {_md_safe(q['q'])}  \n"
+                                    f":gray[{HL_COMPS[c['comp']]['icon']} {_q_tags(c, q)}{pressure}]"
                                 )
-                            with guide_col:
-                                if q.get("guide") or q.get("detail"):
-                                    with st.popover("답변 가이드", use_container_width=True):
-                                        if q.get("guide"):
-                                            st.markdown(_md_safe(q["guide"]))
-                                        if q.get("detail"):
-                                            st.markdown(_set_detail_md(q["detail"]))
-                        if st.button("➕ 이 문장으로 질문 더 만들기", key=f"hl_more_{c['no']}_{c['raw_idx']}",
-                                     disabled=not api_key):
-                            with st.spinner("이 문장에서 새 질문을 만드는 중입니다..."):
-                                if add_more_questions(c["no"], uni, major, profile, student_name, target_desc, api_key):
-                                    _quiet_save(save_args)
-                            st.rerun()
-            if not shown_any:
-                st.info("보여줄 문장이 없습니다. 오른쪽에서 역량 선택이나 '애매·모름 질문만 보기'를 바꿔 보세요.")
+                                chk_col, guide_col = st.columns([3, 1.4], vertical_alignment="center")
+                                with chk_col:
+                                    wkey = f"chk_{q['key']}"
+                                    cur = checks.get(q["key"], "미확인")
+                                    st.radio(
+                                        "준비 상태", _CHECK_OPTS, horizontal=True, label_visibility="collapsed", key=wkey,
+                                        index=_CHECK_OPTS.index(cur) if cur in _CHECK_OPTS else 0,
+                                        on_change=_save_card_check, args=(q["key"], wkey, save_args),
+                                    )
+                                with guide_col:
+                                    if q.get("guide") or q.get("detail") or q.get("answer"):
+                                        with st.popover("답변 가이드", use_container_width=True):
+                                            if q.get("guide"):
+                                                st.markdown(_md_safe(q["guide"]))
+                                            if q.get("detail"):
+                                                st.markdown(_set_detail_md(q["detail"]))
+                                            elif q.get("answer"):
+                                                st.markdown(f"**✅ 모범 답안**  \n{_md_safe(q['answer'])}")
+                            if st.button("➕ 이 문장으로 질문 더 만들기", key=f"hl_more_{c['no']}_{c['raw_idx']}",
+                                         disabled=not api_key):
+                                with st.spinner("이 문장에서 새 질문을 만드는 중입니다..."):
+                                    if add_more_questions(c["no"], uni, major, profile, student_name, target_desc, api_key):
+                                        _quiet_save(save_args)
+                                st.rerun()
+                if not shown_any:
+                    st.info("보여줄 문장이 없습니다. 오른쪽에서 역량 선택이나 '애매·모름 질문만 보기'를 바꿔 보세요.")
         if unmatched_sets:
             with st.expander(f"📌 근거 문장에 붙지 않은 5세트 문항 {len(unmatched_sets)}개"):
                 for d in unmatched_sets:
@@ -3795,6 +3983,7 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                                 st.session_state["highlight_files"] = (
                                     create_highlight_word(_hl_loaded, _ld_name, _ld_desc, is_teacher=False),
                                     create_highlight_word(_hl_loaded, _ld_name, _ld_desc, is_teacher=True),
+                                    create_qa_sheet_word(_hl_loaded, _ld_name, _ld_desc),
                                 )
                         except Exception as e:
                             st.session_state["highlight_error"] = f"저장된 형광펜을 복원하지 못했습니다: {e}"
@@ -4535,6 +4724,8 @@ if st.session_state.chat_history:
         if st.session_state.get("highlight_files"):
             downloadable.append(("🖍️ 형광펜 생기부 · 학생용 (.docx)", st.session_state.highlight_files[0]))
             downloadable.append(("🖍️ 형광펜 생기부 · 교사용 (.docx)", st.session_state.highlight_files[1]))
+            if len(st.session_state.highlight_files) > 2:
+                downloadable.append(("❓ 질문·모범답안지 (.docx)", st.session_state.highlight_files[2]))
         if st.session_state.get("easy_explanation_file"):
             downloadable.append(("📚 생기부 쉬운 해설 (.docx)", st.session_state.easy_explanation_file))
         if st.session_state.get("summary_card_file"):
