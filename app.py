@@ -1982,7 +1982,7 @@ def extract_text_from_pdf(uploaded_file):
       있는 경우 자동으로 페이지를 이미지로 렌더링해 OCR을 시도합니다. 그래서 선생님이 미리
       수동으로 OCR 변환을 해두지 않아도 됩니다.
     """
-    doc = pymupdf.open(stream=uploaded_file.read(), filetype="pdf")
+    doc = pymupdf.open(stream=uploaded_file.getvalue(), filetype="pdf")
     full_text = ""
     for page in doc:
         full_text += page.get_text()
