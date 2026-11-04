@@ -1339,7 +1339,7 @@ def render_interview_profile(profile, uni_name, major, interview_type, real_case
                 )
                 st.dataframe(
                     pd.DataFrame([{"질문 유형": t, "건수": c, "비중": pct} for t, c, pct in lv["dist"]]),
-                    hide_index=True, use_container_width=True,
+                    hide_index=True, width="stretch",
                     column_config={"비중": st.column_config.ProgressColumn("비중", min_value=0, max_value=100, format="%d%%")},
                 )
                 if lv["tracks"]:
@@ -1451,7 +1451,7 @@ def require_login():
     with st.form("login_form"):
         teacher_id = st.text_input("아이디")
         password = st.text_input("비밀번호", type="password")
-        submitted = st.form_submit_button("로그인", use_container_width=True)
+        submitted = st.form_submit_button("로그인", width="stretch")
 
     if submitted:
         teacher_id = (teacher_id or "").strip()
@@ -3248,7 +3248,7 @@ def _render_question_only(hl, show, only_weak, checks, save_args, uni, major, st
     b1, b2 = st.columns([3, 2], vertical_alignment="center")
     with b1:
         if missing and st.button(f"✅ 모범답안 없는 {len(missing)}개 한 번에 만들기", key="hl_ans_all",
-                                 use_container_width=True, disabled=not api_key):
+                                 width="stretch", disabled=not api_key):
             with st.spinner(f"모범답안 {len(missing)}개를 만드는 중입니다... (질문 10개당 30초 안팎)"):
                 if add_answers(missing, uni, major, student_name, target_desc, api_key):
                     _quiet_save(save_args)
@@ -3382,7 +3382,7 @@ def render_card_view(hl, student_name, uni, major, interview_type, difficulty, t
             st.markdown("**질문 더 만들기**")
             if hl["gap_areas"]:
                 st.caption("질문이 하나도 없는 영역: " + ", ".join(hl["gap_areas"]))
-                if st.button(f"➕ 질문 없는 {len(hl['gap_areas'])}곳에 질문 만들기", use_container_width=True,
+                if st.button(f"➕ 질문 없는 {len(hl['gap_areas'])}곳에 질문 만들기", width="stretch",
                              key="hl_fill_gaps", disabled=not api_key):
                     with st.spinner("빈 영역에서 문장을 골라 질문을 만드는 중입니다..."):
                         if add_gap_cards(uni, profile, student_name, target_desc, api_key):
@@ -3392,8 +3392,8 @@ def render_card_view(hl, student_name, uni, major, interview_type, difficulty, t
                 st.caption("모든 영역에 질문이 있습니다.")
             st.caption("문장마다 '➕ 질문 더 만들기'를 누르면 그 문장에서 새 질문이 2개씩 나옵니다.")
             if hl["gaps"]:
-                with st.popover("영역별 준비 상태", use_container_width=True):
-                    st.dataframe(pd.DataFrame(hl["gaps"]), hide_index=True, use_container_width=True)
+                with st.popover("영역별 준비 상태", width="stretch"):
+                    st.dataframe(pd.DataFrame(hl["gaps"]), hide_index=True, width="stretch")
                     if hl.get("subjects"):
                         st.caption("질문이 닿은 세특 과목: " + ", ".join(hl["subjects"]))
 
@@ -3462,7 +3462,7 @@ def render_card_view(hl, student_name, uni, major, interview_type, difficulty, t
                                     )
                                 with guide_col:
                                     if q.get("guide") or q.get("detail") or q.get("answer"):
-                                        with st.popover("답변 가이드", use_container_width=True):
+                                        with st.popover("답변 가이드", width="stretch"):
                                             if q.get("guide"):
                                                 st.markdown(_md_safe(q["guide"]))
                                             if q.get("detail"):
@@ -4301,7 +4301,7 @@ def render_student_page(s_param):
             st.stop()
         with st.form("stu_pin_form"):
             pin = st.text_input("선생님께 받은 PIN 4자리", type="password", max_chars=4)
-            go = st.form_submit_button("시작하기", use_container_width=True)
+            go = st.form_submit_button("시작하기", width="stretch")
         if go:
             if hmac.compare_digest(str(pin or "").strip().encode(), str(link.get("pin", "")).encode()):
                 st.session_state[ok_key] = True
@@ -4331,7 +4331,7 @@ def render_student_page(s_param):
         done = sum(1 for q in qs if ans["q"].get(q["key"], {}).get("tries"))
         st.progress(done / len(qs) if qs else 0.0, text=f"답한 질문 {done}/{len(qs)} · 오늘 첨삭 {used}/{limit}회")
     with top2:
-        if st.button("🔄 새로고침", use_container_width=True, help="선생님 코멘트와 새 질문을 다시 불러옵니다."):
+        if st.button("🔄 새로고침", width="stretch", help="선생님 코멘트와 새 질문을 다시 불러옵니다."):
             for k in (ans_key, cmt_key):
                 st.session_state.pop(k, None)
             st.session_state[f"stu_reload_{sid}"] = True
@@ -4402,8 +4402,8 @@ def _student_practice_tab(sid, link, ans, cmts, name, uni, major, record_id, api
 
     st.selectbox("질문 고르기", keys, key=sel_key, format_func=lambda k: label(next(q for q in view if q["key"] == k)))
     n1, n2 = st.columns(2)
-    n1.button("◀ 이전 질문", use_container_width=True, on_click=move, args=(-1,), key=f"stu_prev_{sid}")
-    n2.button("다음 질문 ▶", use_container_width=True, on_click=move, args=(1,), key=f"stu_next_{sid}")
+    n1.button("◀ 이전 질문", width="stretch", on_click=move, args=(-1,), key=f"stu_prev_{sid}")
+    n2.button("다음 질문 ▶", width="stretch", on_click=move, args=(1,), key=f"stu_next_{sid}")
 
     q = next(x for x in view if x["key"] == st.session_state[sel_key])
     item = ans["q"].setdefault(q["key"], {"q": q["q"], "tries": []})
@@ -4428,7 +4428,7 @@ def _student_practice_tab(sid, link, ans, cmts, name, uni, major, record_id, api
             txt = st.text_area("내 답변", key=f"stu_txt_{sid}_{q['key']}", height=200,
                                placeholder="결론부터 말해 보세요. 예) 저는 ~했습니다. 그 과정에서 ~. 이를 통해 ~를 배웠습니다.")
             st.caption(f"{len(txt)}자 · 말하면 약 {max(1, round(len(txt) / 6))}초 (권장 40∼60초, 240∼360자)")
-            submitted = st.button("📝 첨삭 받기", type="primary", use_container_width=True,
+            submitted = st.button("📝 첨삭 받기", type="primary", width="stretch",
                                   disabled=over or not api_key, key=f"stu_go_{sid}_{q['key']}")
             if submitted and len(txt.strip()) < 20:
                 st.warning("답변을 조금 더 써 주세요(20자 이상).")
@@ -4443,7 +4443,7 @@ def _student_practice_tab(sid, link, ans, cmts, name, uni, major, record_id, api
             if sec:
                 note = "적당해요" if 40 <= sec <= 70 else ("조금 짧아요" if sec < 40 else "조금 길어요")
                 st.caption(f"녹음 길이 {sec}초 — {note} (권장 40∼60초)")
-            submitted = st.button("📝 첨삭 받기", type="primary", use_container_width=True,
+            submitted = st.button("📝 첨삭 받기", type="primary", width="stretch",
                                   disabled=over or not api_key, key=f"stu_go_a_{sid}_{q['key']}")
             if submitted and not data:
                 st.warning("먼저 녹음 버튼을 눌러 답을 녹음해 주세요.")
@@ -4487,7 +4487,7 @@ def _student_practice_tab(sid, link, ans, cmts, name, uni, major, record_id, api
         with st.container(border=True):
             st.markdown(f"**🔥 꼬리질문 {len(follows) + 1}.** {_md_safe(next_q)}")
             fa = st.text_area("이어서 답하기", key=f"stu_fa_{sid}_{q['key']}_{len(tries)}_{len(follows)}", height=130)
-            f_go = st.button("📝 꼬리질문 첨삭 받기", use_container_width=True, disabled=over or not api_key,
+            f_go = st.button("📝 꼬리질문 첨삭 받기", width="stretch", disabled=over or not api_key,
                              key=f"stu_fgo_{sid}_{q['key']}_{len(tries)}_{len(follows)}")
             if f_go and len(fa.strip()) < 10:
                 st.warning("답변을 조금 더 써 주세요(10자 이상).")
@@ -4551,7 +4551,7 @@ def _student_record_tab(qs, ans):
     st.bar_chart(chart, stack=False, height=240, horizontal=True)
     weak = min(FB_CRITERIA, key=lambda k: avg(lasts, k))
     st.caption(f"가장 보완할 점: **{weak}** — {FB_CRITERIA_HELP[weak]}")
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
 # ---------------------------------------------------------------- 선생님: 기록별 링크·현황판
@@ -4615,7 +4615,7 @@ def render_teacher_practice(hl, student_name, uni, major):
             b1, b2, b3, b4 = st.columns(4)
             settings = {k: link.get(k) for k in ("pin", "limit", "owner", "created")}
             token = s_param.split(".", 1)[1] if "." in s_param else s_param
-            if b1.button("🔄 최신 질문 보내기", use_container_width=True, key="tp_sync",
+            if b1.button("🔄 최신 질문 보내기", width="stretch", key="tp_sync",
                          help="질문을 더 만들었거나 모범답안을 만든 뒤 누르면 학생 화면에 반영됩니다."):
                 try:
                     save_student_link(token, record_id, student_name, uni, major, settings, snapshot())
@@ -4623,7 +4623,7 @@ def render_teacher_practice(hl, student_name, uni, major):
                     st.rerun()
                 except Exception as e:
                     st.error(f"보내지 못했습니다: {e}")
-            if b2.button("🔢 PIN 바꾸기", use_container_width=True, key="tp_pin"):
+            if b2.button("🔢 PIN 바꾸기", width="stretch", key="tp_pin"):
                 settings["pin"] = f"{_pysecrets.randbelow(10000):04d}"
                 save_student_link(token, record_id, student_name, uni, major, settings,
                                   {"qs": link.get("qs", []), "record": link.get("record", "")})
@@ -4637,7 +4637,7 @@ def render_teacher_practice(hl, student_name, uni, major):
                                   {"qs": link.get("qs", []), "record": link.get("record", "")})
                 st.session_state["tp_reload"] = True
                 st.rerun()
-            if b4.button("⛔ 링크 끊기", use_container_width=True, key="tp_cut",
+            if b4.button("⛔ 링크 끊기", width="stretch", key="tp_cut",
                          help="학생이 더 이상 들어올 수 없습니다. 답안 기록은 남고, 새 링크를 만들면 이어집니다."):
                 _delete_record_raw(link_id)
                 st.session_state["tp_reload"] = True
@@ -4652,7 +4652,7 @@ def render_practice_board(hl, record_id, student_name, uni, major, data):
     with head1:
         st.markdown(f"**📋 학생 답안 현황판** · 마지막 활동 {ans.get('updated', '없음')}")
     with head2:
-        if st.button("🔄 답안 새로고침", use_container_width=True, key="tp_refresh"):
+        if st.button("🔄 답안 새로고침", width="stretch", key="tp_refresh"):
             st.session_state["tp_reload"] = True
             st.rerun()
     qmap = {q["key"]: (c, q) for c in hl.get("items", []) for q in c["qs"]}
@@ -4777,7 +4777,7 @@ def render_class_practice_stats():
         st.markdown("**기준별 반 평균 (5점 만점)**")
         st.bar_chart(pd.DataFrame({"반 평균": [cls[k] for k in FB_CRITERIA]}, index=FB_CRITERIA), height=220, horizontal=True)
         st.caption(f"우리 반이 가장 약한 기준은 **{weak}**({FB_CRITERIA_HELP[weak]})입니다. 다음 수업 주제로 삼아 보세요.")
-        st.dataframe(pd.DataFrame(rows).sort_values("최근 평균"), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rows).sort_values("최근 평균"), hide_index=True, width="stretch")
 
 
 def practice_summary_for_growth(student_name):
@@ -4819,7 +4819,7 @@ with st.sidebar:
     _teacher = current_teacher()
     if _teacher:
         st.markdown(f"👤 **{_teacher}** 선생님" + (" · 관리자" if is_admin() else ""))
-        if st.button("로그아웃", use_container_width=True, key="logout_button"):
+        if st.button("로그아웃", width="stretch", key="logout_button"):
             logout()
         st.divider()
     else:
@@ -4856,7 +4856,7 @@ with st.sidebar:
 
     # 구글시트 연결이 실제로 살아있는지 직접 확인 (토큰이 어긋나면 저장이 조용히 실패할 수 있음)
     if _appsscript_enabled():
-        if st.button("🔌 구글시트 연결 테스트", use_container_width=True, key="conn_test_btn"):
+        if st.button("🔌 구글시트 연결 테스트", width="stretch", key="conn_test_btn"):
             try:
                 test_payload = {
                     "token": st.secrets["APPS_SCRIPT_TOKEN"], "action": "save",
@@ -4908,7 +4908,7 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
         selected_label = st.selectbox("불러올 기록을 선택하세요", list(record_options.keys()), key="record_select_box")
         col_load, col_delete, col_grow = st.columns(3)
         with col_load:
-            if st.button("📥 이 기록 불러오기", use_container_width=True):
+            if st.button("📥 이 기록 불러오기", width="stretch"):
                 row = get_record(record_options[selected_label])
                 if row:
                     st.session_state["region_select"] = "직접 입력"
@@ -4993,12 +4993,12 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                     st.success(f"'{row['student_name']}' 학생의 기록을 불러왔습니다.")
                     st.rerun()
         with col_delete:
-            if st.button("🗑️ 이 기록 삭제", use_container_width=True):
+            if st.button("🗑️ 이 기록 삭제", width="stretch"):
                 delete_record(record_options[selected_label])
                 st.success("삭제되었습니다.")
                 st.rerun()
         with col_grow:
-            if st.button("📈 이 학생 성장 리포트", use_container_width=True):
+            if st.button("📈 이 학생 성장 리포트", width="stretch"):
                 if not api_key:
                     st.error("API 키를 입력해 주세요.")
                 else:
@@ -5036,7 +5036,7 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                                 with open(report_path, "rb") as f:
                                     st.download_button(
                                         "📈 성장 리포트 다운로드 (.docx)", f, file_name=os.path.basename(report_path),
-                                        use_container_width=True, key="dl_growth_report_inline"
+                                        width="stretch", key="dl_growth_report_inline"
                                     )
                                 st.markdown(report_text)
                             except Exception as e:
@@ -5359,12 +5359,12 @@ with st.expander("👥 여러 학생 한 번에 처리 (일괄 생성)", expande
         })
         st.markdown("아래 표에서 학생명·대학·학과를 학생별로 확인/수정한 뒤 생성해 주세요.")
         edited_rows = st.data_editor(
-            default_rows, key="batch_edit_table", use_container_width=True, hide_index=True,
+            default_rows, key="batch_edit_table", width="stretch", hide_index=True,
             disabled=["파일명"]
         )
         batch_difficulty = st.radio("⚙️ 일괄 적용 난이도", ["하 (기초)", "중 (표준)", "상 (압박)"], horizontal=True, index=1, key="batch_difficulty_radio")
 
-        if st.button("🚀 일괄 생성 시작", use_container_width=True):
+        if st.button("🚀 일괄 생성 시작", width="stretch"):
             if not api_key:
                 st.error("API 키를 입력해 주세요.")
             elif edited_rows["학생명"].isna().any() or (edited_rows["학생명"].astype(str).str.strip() == "").any():
@@ -5430,7 +5430,7 @@ with st.expander("👥 여러 학생 한 번에 처리 (일괄 생성)", expande
                     st.success(f"✅ {success_count}명 처리 완료! 아래에서 zip 파일로 한 번에 내려받으세요.")
                     st.download_button(
                         "📦 전체 학생 워드 문서 zip 다운로드", zip_buffer.getvalue(),
-                        file_name="일괄_면접패키지.zip", mime="application/zip", use_container_width=True
+                        file_name="일괄_면접패키지.zip", mime="application/zip", width="stretch"
                     )
                 if fail_names:
                     st.error("❌ 다음 학생은 처리에 실패했습니다:\n" + "\n".join(fail_names))
@@ -5728,7 +5728,7 @@ if st.session_state.chat_history:
                 with open(path, "rb") as f:
                     st.download_button(
                         label, f, file_name=os.path.basename(path),
-                        use_container_width=True, key=f"dl_{i}_{os.path.basename(path)}"
+                        width="stretch", key=f"dl_{i}_{os.path.basename(path)}"
                     )
 
     # -------------------------------------------------------------------
@@ -5738,7 +5738,7 @@ if st.session_state.chat_history:
     # -------------------------------------------------------------------
     save_col1, save_col_new, save_col2 = st.columns([1, 1, 2])
     with save_col_new:
-        if st.button("🆕 새 기록으로 저장", use_container_width=True, key="manual_save_new_btn",
+        if st.button("🆕 새 기록으로 저장", width="stretch", key="manual_save_new_btn",
                      help="같은 학생이라도 이번 연습을 '새로운 회차'로 따로 남기고 싶을 때 사용하세요. (성장 리포트용 회차가 쌓입니다)"):
             st.session_state.current_record_id = new_record_id()
             _new_key = f"{student_name}|{uni}|{major}|{interview_type}"
@@ -5750,7 +5750,7 @@ if st.session_state.chat_history:
             else:
                 st.error(f"❌ 저장 실패: {new_info['error']}")
     with save_col1:
-        if st.button("💾 지금 저장하기", use_container_width=True, key="manual_save_btn"):
+        if st.button("💾 지금 저장하기", width="stretch", key="manual_save_btn"):
             manual_info = save_current_session(student_name, uni, major, interview_type, difficulty, quiet=True)
             if manual_info["ok"] and "구글시트" in manual_info["where"]:
                 st.success(f"✅ {manual_info['where']}에 저장했습니다. ({manual_info['at']})")
@@ -5774,7 +5774,7 @@ if st.session_state.chat_history:
             if not _has_record:
                 st.caption("생기부 원문이 없습니다. 위에서 생기부 PDF를 다시 올린 뒤 아래 버튼을 눌러 주세요.")
             if st.button("🖍️ 형광펜·쉬운 해설 다시 만들기", disabled=not _has_record or not api_key,
-                         use_container_width=True, key="rerun_highlight"):
+                         width="stretch", key="rerun_highlight"):
                 _rec = st.session_state.get("loaded_student_record_text", "")
                 if uploaded_file and not _rec.strip():
                     _rec = extract_text_from_pdf(uploaded_file)
@@ -5809,7 +5809,7 @@ if st.session_state.chat_history:
             interview_date_input = st.date_input("면접 일자", value=datetime.date.today(), key="interview_date_input")
         include_q = st.checkbox("생성된 면접 질문을 '문항별 평가란'에 함께 넣기", value=True, key="eval_include_questions")
 
-        if st.button("📝 평가표 만들기", use_container_width=True):
+        if st.button("📝 평가표 만들기", width="stretch"):
             try:
                 date_str = interview_date_input.strftime("%Y. %m. %d.") if interview_date_input else ""
                 st.session_state.evaluation_sheet_file = create_evaluation_sheet_word(
@@ -5825,7 +5825,7 @@ if st.session_state.chat_history:
                 st.download_button(
                     "📥 평가표 다운로드 (.docx)", f,
                     file_name=os.path.basename(st.session_state.evaluation_sheet_file),
-                    use_container_width=True, key="dl_eval_sheet_inline"
+                    width="stretch", key="dl_eval_sheet_inline"
                 )
 
     st.divider()
@@ -5890,7 +5890,7 @@ if st.session_state.chat_history:
                 format_func=lambda i: f"Q{i+1}. {q_labels[i]}", key="written_answer_q_select"
             )
             written_answer = st.text_area("학생이 직접 작성한 답변을 붙여넣어 주세요", height=150, key="written_answer_text")
-            if st.button("✍️ 이 답변 첨삭 받기", use_container_width=True):
+            if st.button("✍️ 이 답변 첨삭 받기", width="stretch"):
                 if not api_key:
                     st.error("API 키를 입력해 주세요.")
                 elif not written_answer.strip():
