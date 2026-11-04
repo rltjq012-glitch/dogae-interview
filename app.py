@@ -1814,6 +1814,13 @@ def _appsscript_delete_record(record_id):
 # ---- 공용 인터페이스: Secrets 설정 여부에 따라 자동으로 저장소를 선택 ----
 #   우선순위: Apps Script(가장 간단, GCP 콘솔 불필요) > Google Sheets 서비스 계정 > 로컬 SQLite
 def save_record(*args, quiet=False, **kwargs):
+    _clear_records_cache()
+    try:
+        return _save_record_impl(*args, quiet=quiet, **kwargs)
+    finally:
+        _clear_records_cache()
+
+def _save_record_impl(*args, quiet=False, **kwargs):
     """기록을 저장하고 '어디에 저장되었는지'를 딕셔너리로 돌려줍니다.
     반환값: {"ok": bool, "where": "구글시트(Apps Script)"/"구글시트(서비스 계정)"/"로컬 임시저장",
              "at": "HH:MM:SS", "error": "(실패 시 사유)"}
@@ -1853,20 +1860,36 @@ def save_record(*args, quiet=False, **kwargs):
     st.session_state["last_save_info"] = info
     return info
 
+# 속도 개선: 화면을 클릭할 때마다(=Streamlit이 스크립트를 다시 실행할 때마다) 구글시트 전체를
+# 다시 내려받지 않도록, 기록 목록을 2분간 캐시합니다. 저장·삭제 시에는 캐시를 즉시 비웁니다.
+@st.cache_data(ttl=120, show_spinner=False)
+def _fetch_records_cached(backend):
+    if backend == "appsscript":
+        return _appsscript_list_records()
+    if backend == "sheets":
+        return _sheets_list_records()
+    return [dict(r) for r in _sqlite_list_records()]
+
+def _clear_records_cache():
+    try:
+        _fetch_records_cached.clear()
+    except Exception:
+        pass
+
 def _list_records_raw():
     if _appsscript_enabled():
         try:
-            return _appsscript_list_records()
+            return _fetch_records_cached("appsscript")
         except Exception as e:
             st.warning(f"⚠️ Apps Script 조회에 실패했습니다: {e}")
             return []
     if _sheets_enabled():
         try:
-            return _sheets_list_records()
+            return _fetch_records_cached("sheets")
         except Exception as e:
             st.warning(f"⚠️ Google Sheets 조회에 실패했습니다: {e}")
             return []
-    return _sqlite_list_records()
+    return _fetch_records_cached("sqlite")
 
 def _get_record_raw(record_id):
     if _appsscript_enabled():
@@ -1884,6 +1907,12 @@ def _get_record_raw(record_id):
     return _sqlite_get_record(record_id)
 
 def _delete_record_raw(record_id):
+    try:
+        return _delete_record_impl(record_id)
+    finally:
+        _clear_records_cache()
+
+def _delete_record_impl(record_id):
     if _appsscript_enabled():
         try:
             return _appsscript_delete_record(record_id)
