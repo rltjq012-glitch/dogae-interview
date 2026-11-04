@@ -3079,10 +3079,20 @@ def create_highlight_word(hl, student_name, target_desc, is_teacher=False):
         unmatched_sets = []
     doc = Document()
     set_document_font(doc)
-    doc.add_heading(f"🖍️ [{student_name}] {target_desc} 형광펜 생기부 {'(교사용)' if is_teacher else '(학생용)'}", level=1)
-    doc.add_paragraph(
-        f"면접관이 짚을 만한 문장 {len(hl['items'])}곳에 역량별로 색을 칠하고, 바로 아래에 예상 질문 {hl['q_total']}개를 붙였습니다."
+    doc.add_heading(
+        f"🎓 [{student_name}] {target_desc} 모의면접 {'지침서 (교사용)' if is_teacher else '워크북 (학생용)'}", level=1
     )
+    doc.add_paragraph(
+        f"면접관이 짚을 만한 문장 {len(hl['items'])}곳에 역량별로 색을 칠하고, 바로 아래에 예상 질문 {hl['q_total']}개를 붙였습니다. "
+        + ("질문마다 평가 의도·모범 답안·꼬리질문을 함께 넣었습니다." if is_teacher
+           else "질문마다 먼저 소리 내어 답해 보고 자신 있음·애매·모름에 체크하세요. 맨 뒤에 생기부 쉬운 해설이 있습니다.")
+    )
+    if is_teacher:
+        _bm = re.search(r'### 🔍 \[생기부 심층 분석 브리핑 리포트\](.*?)(?=### 📌|### 📄|$)',
+                        str(st.session_state.get("last_result_text", "")), re.DOTALL)
+        if _bm and _bm.group(1).strip():
+            doc.add_heading("생기부 분석 브리핑", level=2)
+            add_intro_paragraphs(doc, _bm.group(1).strip())
     legend = doc.add_paragraph()
     for k, v in HL_COMPS.items():
         r = legend.add_run(f" {v['label']} ({hl['count'].get(k, 0)}) ")
@@ -3154,13 +3164,15 @@ def create_highlight_word(hl, student_name, target_desc, is_teacher=False):
                     gr = gp.add_run("답변 가이드: " + q["guide"])
                     gr.font.size = Pt(9)
                     gr.font.color.rgb = RGBColor(0x1F, 0x4E, 0x79)
-                if is_teacher and q.get("detail"):
-                    for key in ("모범답안", "꼬리질문"):
-                        if q["detail"].get(key):
+                if is_teacher:
+                    _det = q.get("detail") or {}
+                    for key, val in (("평가의도", _det.get("평가의도")), ("모범답안", answer_of(q)),
+                                     ("꼬리질문", _det.get("꼬리질문"))):
+                        if val:
                             dp = doc.add_paragraph()
                             dp.paragraph_format.left_indent = Cm(0.8)
                             dp.paragraph_format.space_after = Pt(4)
-                            dr = dp.add_run(f"{key}: " + re.sub(r"\s+", " ", q["detail"][key]))
+                            dr = dp.add_run(f"{key}: " + re.sub(r"\s+", " ", val))
                             dr.font.size = Pt(9)
             if is_teacher and c.get("reason"):
                 rp = doc.add_paragraph()
@@ -3169,18 +3181,24 @@ def create_highlight_word(hl, student_name, target_desc, is_teacher=False):
                 rr.font.size = Pt(8.5)
                 rr.italic = True
     if unmatched_sets:
-        doc.add_heading("문장에 붙지 않은 5세트 문항", level=2)
+        doc.add_heading("추가 예상 질문 (특정 문장에 붙지 않은 문항)", level=2)
         for d in unmatched_sets:
             qp = doc.add_paragraph()
             qp.add_run(f"5세트 {d['no']}번 · {d['title']}  ").bold = True
             qp.add_run(re.sub(r"\s+", " ", d["질문"]))
             if is_teacher:
-                for key in ("모범답안", "꼬리질문"):
+                for key in ("평가의도", "모범답안", "꼬리질문"):
                     if d.get(key):
                         dr = doc.add_paragraph().add_run(f"{key}: " + re.sub(r"\s+", " ", d[key]))
                         dr.font.size = Pt(9)
-    suffix = "교사용" if is_teacher else "학생용"
-    path = _out_path(f"{student_name}_형광펜생기부_{suffix}.docx")
+    _easy = str(st.session_state.get("easy_explanation_text") or "").strip()
+    if not is_teacher and _easy:
+        from docx.enum.text import WD_BREAK
+        doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+        doc.add_heading("부록. 생기부 쉬운 해설 (고등학교 1학년 눈높이)", level=2)
+        add_intro_paragraphs(doc, _easy)
+    suffix = "교사용_지침서" if is_teacher else "학생용_워크북"
+    path = _out_path(f"{student_name}_{target_desc}_{suffix}.docx")
     doc.save(path)
     return path
 
@@ -4978,11 +4996,8 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                             f"{row['university']}_{row['major']}"
                         )
                         st.session_state["word_files"] = (stu_path, tea_path)
-                        # 요약카드·평가표는 AI 호출 없이 만들 수 있으므로 불러올 때 함께 다시 생성
+                        # 평가표는 AI 호출 없이 만들 수 있으므로 불러올 때 함께 다시 생성
                         try:
-                            st.session_state["summary_card_file"] = create_summary_card_word(
-                                row["result_text"], row["student_name"], row["university"], row["major"], loaded_type
-                            )
                             st.session_state["evaluation_sheet_file"] = create_evaluation_sheet_word(
                                 row["result_text"], row["student_name"], row["university"], row["major"], loaded_type
                             )
@@ -5554,14 +5569,8 @@ if st.button("🚀 면접 패키지 생성 시작"):
                 st.session_state.highlight_raw_items = []
                 st.session_state.highlight_error = ""
 
-            # 🗂️ 면접 직전에 훑어볼 A4 한 장 요약카드 (별도 AI 호출 없이 방금 생성된 문항에서 바로 추출)
-            try:
-                st.session_state.summary_card_file = create_summary_card_word(
-                    result_text, student_name, uni, major, interview_type
-                )
-            except Exception as e:
-                st.session_state.summary_card_file = None
-                st.warning(f"⚠️ 요약카드 생성에 실패했습니다: {e}")
+            # (요약카드는 워크북과 내용이 겹쳐 더 이상 만들지 않습니다)
+            st.session_state.summary_card_file = None
 
             # 📝 교사용 인쇄 평가표 (AI 호출 없이 양식만 생성)
             try:
@@ -5700,26 +5709,26 @@ if st.session_state.chat_history:
 
     if st.session_state.word_files:
         stu_path, tea_path = st.session_state.word_files
-        chat_path = create_chat_history_word(st.session_state.chat_history, student_name)
+        # 형광펜 카드가 있으면 그것이 '생기부 문장 + 질문 + 5세트 문항'을 모두 합친 최종본입니다.
+        # (쉬운 해설은 학생용 워크북 부록, 브리핑·평가의도·모범답안·꼬리질문은 교사용 지침서에 들어 있음)
+        _hf = st.session_state.get("highlight_files")
+        if _hf and interview_type == "생기부 기반 면접":
+            stu_path, tea_path = _hf[0], _hf[1]
 
         downloadable = [
-            ("📥 학생용 워크북 (.docx)", stu_path),
-            ("📥 교사용 지침서 (.docx)", tea_path),
-            ("💬 피드백 대화 내역 (.docx)", chat_path),
+            ("📘 학생용 워크북 (.docx)", stu_path),
+            ("📕 교사용 지침서 (.docx)", tea_path),
         ]
-        if st.session_state.get("highlight_files"):
-            downloadable.append(("🖍️ 형광펜 생기부 · 학생용 (.docx)", st.session_state.highlight_files[0]))
-            downloadable.append(("🖍️ 형광펜 생기부 · 교사용 (.docx)", st.session_state.highlight_files[1]))
-            if len(st.session_state.highlight_files) > 2:
-                downloadable.append(("❓ 질문·모범답안지 (.docx)", st.session_state.highlight_files[2]))
-        if st.session_state.get("easy_explanation_file"):
-            downloadable.append(("📚 생기부 쉬운 해설 (.docx)", st.session_state.easy_explanation_file))
-        if st.session_state.get("summary_card_file"):
-            downloadable.append(("🗂️ 면접직전 요약카드 (.docx)", st.session_state.summary_card_file))
         if st.session_state.get("evaluation_sheet_file"):
             downloadable.append(("📝 교사용 평가표 (.docx)", st.session_state.evaluation_sheet_file))
         if st.session_state.get("growth_report_file"):
             downloadable.append(("📈 학생 성장 리포트 (.docx)", st.session_state.growth_report_file))
+        # 피드백 대화는 실제로 주고받은 내용이 있을 때만 내려받기를 보여 줍니다.
+        if any(m.get("role") == "user" for m in st.session_state.chat_history):
+            downloadable.append((
+                "💬 피드백 대화 내역 (.docx)",
+                create_chat_history_word(st.session_state.chat_history, student_name),
+            ))
 
         downloadable = [(label, path) for label, path in downloadable if path and os.path.exists(path)]
         download_cols = st.columns(max(min(len(downloadable), 4), 1))
@@ -5797,7 +5806,7 @@ if st.session_state.chat_history:
     # -------------------------------------------------------------------
     # 📝 교사용 면접 평가표 (인쇄해서 손으로 채점하는 양식)
     # -------------------------------------------------------------------
-    with st.expander("📝 교사용 면접 평가표 만들기 (인쇄용)", expanded=False):
+    with st.expander("📝 평가표에 평가 교사·면접 일자 넣기", expanded=False):
         st.caption(
             "실제 대학 학생부종합전형 면접 평가요소(학업역량·전공적합성·인성·발전가능성)와 면접 태도 평가 기준을 바탕으로 "
             "**항목당 10점 만점 / 총 100점** 채점표와 종합의견란이 들어간 A4 양식을 만듭니다. 인쇄해서 면접 현장에서 바로 채점하실 수 있습니다."
@@ -5809,24 +5818,16 @@ if st.session_state.chat_history:
             interview_date_input = st.date_input("면접 일자", value=datetime.date.today(), key="interview_date_input")
         include_q = st.checkbox("생성된 면접 질문을 '문항별 평가란'에 함께 넣기", value=True, key="eval_include_questions")
 
-        if st.button("📝 평가표 만들기", width="stretch"):
+        if st.button("📝 평가표에 반영하기", width="stretch"):
             try:
                 date_str = interview_date_input.strftime("%Y. %m. %d.") if interview_date_input else ""
                 st.session_state.evaluation_sheet_file = create_evaluation_sheet_word(
                     st.session_state.get("last_result_text", ""), student_name, uni, major, interview_type,
                     evaluator=evaluator_name.strip(), interview_date=date_str, include_questions=include_q
                 )
-                st.success("✅ 평가표가 만들어졌습니다. 아래 버튼으로 내려받아 인쇄하세요.")
+                st.rerun()  # 위쪽 '📝 교사용 평가표' 버튼이 새 파일을 내려받도록 다시 그립니다.
             except Exception as e:
                 st.error(f"❌ 평가표 생성에 실패했습니다: {e}")
-
-        if st.session_state.get("evaluation_sheet_file") and os.path.exists(st.session_state.evaluation_sheet_file):
-            with open(st.session_state.evaluation_sheet_file, "rb") as f:
-                st.download_button(
-                    "📥 평가표 다운로드 (.docx)", f,
-                    file_name=os.path.basename(st.session_state.evaluation_sheet_file),
-                    width="stretch", key="dl_eval_sheet_inline"
-                )
 
     st.divider()
 
@@ -5835,13 +5836,12 @@ if st.session_state.chat_history:
     for _mi, message in enumerate(st.session_state.chat_history):
         with st.chat_message(message["role"]):
             if _cards_on and _mi == 0 and message["role"] == "assistant" and "### 📌" in str(message["content"]):
+                # 문항 원문은 위 형광펜 질문 카드에 이미 모두 합쳐져 있으므로 다시 펼쳐 보여 주지 않습니다.
                 st.markdown(
-                    "🖍️ 5세트 문항은 위 **형광펜 질문 카드**에 근거 문장과 함께 합쳐 두었습니다. "
+                    "🖍️ 문항은 위 **형광펜 질문 카드**에 근거 문장과 함께 정리했습니다. "
                     "각 질문의 **'답변 가이드'**에서 평가 의도·모범 답안·꼬리질문을 볼 수 있습니다.  \n"
                     "문항을 고치거나 더 만들고 싶으면 아래 채팅창에 말씀해 주세요."
                 )
-                with st.expander("📄 문항 원문 전체 보기 (워드 워크북과 같은 내용)"):
-                    st.markdown(message["content"])
             else:
                 st.markdown(message["content"])
 
@@ -5983,6 +5983,20 @@ if st.session_state.chat_history:
 
                         stu_path, tea_path = create_word_files(new_result, student_name, interview_type, target_desc)
                         st.session_state.word_files = (stu_path, tea_path)
+                        # 형광펜 워크북·지침서도 수정된 문항을 반영해 다시 만듭니다.
+                        if st.session_state.get("highlight_data"):
+                            try:
+                                set_highlight_state(st.session_state.highlight_data,
+                                                    st.session_state.get("highlight_raw_items", []),
+                                                    student_name, target_desc)
+                            except Exception:
+                                pass
+                        try:
+                            st.session_state.evaluation_sheet_file = create_evaluation_sheet_word(
+                                new_result, student_name, uni, major, interview_type
+                            )
+                        except Exception:
+                            pass
 
                         if st.session_state.get("current_record_id"):
                             save_record(
