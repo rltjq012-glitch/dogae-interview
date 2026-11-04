@@ -5719,6 +5719,8 @@ if st.session_state.chat_history:
             ("📘 학생용 워크북 (.docx)", stu_path),
             ("📕 교사용 지침서 (.docx)", tea_path),
         ]
+        if interview_type == "생기부 기반 면접" and st.session_state.get("easy_explanation_file"):
+            downloadable.append(("📚 생기부 쉬운 해설 (.docx)", st.session_state.easy_explanation_file))
         if st.session_state.get("evaluation_sheet_file"):
             downloadable.append(("📝 교사용 평가표 (.docx)", st.session_state.evaluation_sheet_file))
         if st.session_state.get("growth_report_file"):
