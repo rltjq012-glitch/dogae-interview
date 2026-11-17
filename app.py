@@ -2022,32 +2022,36 @@ def extract_text_from_pdf(uploaded_file):
 #   순서: 일반 모델(최신 버전 → 낮은 버전, 같은 버전이면 Pro → Flash, 정식 → 미리보기)
 #         → 그다음 Lite 모델 → 마지막으로 '-latest' 별칭
 # -------------------------------------------------------------------------
-GEMINI_MAX_TRIES = 5                 # 한 번 호출할 때 최대로 시도할 모델 수
+GEMINI_MAX_REAL_FAILS = 6            # 한 번 호출에서 '진짜 실패'(한도·과부하 등)를 몇 개 모델까지 견딜지
+GEMINI_TIME_BUDGET = 240             # 한 번 호출에서 모델을 바꿔 가며 시도할 최대 시간(초)
 GEMINI_FALLBACK_MODELS = [           # 목록 조회가 실패했을 때도 쓸 수 있는 별칭(항상 최신을 가리킴)
-    "gemini-flash-latest", "gemini-pro-latest", "gemini-flash-lite-latest",
-    "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite",
+    "gemini-flash-latest", "gemini-flash-lite-latest", "gemini-pro-latest",
 ]
 # gemini-3.8-flash, gemini-3.1-pro-preview, gemini-3.5-flash-lite, gemini-2.5-flash-preview-09-2025 …
 # (tts·live·image·transcribe·embedding 같은 특수 모델은 이 형식에 맞지 않아 자동으로 빠집니다)
 _GEMINI_TEXT_MODEL_RX = re.compile(
     r"^gemini-(\d+(?:\.\d+)?)-(pro|flash-lite|flash)(?:-(preview(?:-\d{2}-\d{4})?|latest|\d{3}))?$"
 )
-_MODEL_GONE_RX = re.compile(r"404|NOT_FOUND|not found|not supported|no longer|deprecated|shut ?down|PERMISSION_DENIED", re.I)
 _KEY_ERROR_RX = re.compile(r"API_KEY_INVALID|API key not valid|API key expired", re.I)
+_MODEL_GONE_RX = re.compile(r"\b404\b|NOT_FOUND|not found|not supported|no longer available|deprecated|shut ?down|PERMISSION_DENIED|\b403\b", re.I)
 # ⚠️ 예전 정규식은 'rate'만 있어도 걸려서, 404 메시지 속 'generateContent'까지 사용량 한도로 오인했습니다.
-_RATE_LIMIT_RX = re.compile(r"429|RESOURCE_EXHAUSTED|quota|rate[ _-]?limit", re.I)
-_BUSY_RX = re.compile(r"500|503|UNAVAILABLE|overloaded|INTERNAL|DEADLINE", re.I)
+_RATE_LIMIT_RX = re.compile(r"\b429\b|RESOURCE_EXHAUSTED|quota|rate[ _-]?limit", re.I)
+_NO_QUOTA_RX = re.compile(r"limit:\s*0\b", re.I)          # 이 키(무료 등급 등)로는 아예 쓸 수 없는 모델
+_DAILY_RX = re.compile(r"PerDay", re.I)                  # 하루 한도 소진
+_BUSY_RX = re.compile(r"\b50[0-4]\b|UNAVAILABLE|overloaded|INTERNAL|DEADLINE|timed? ?out", re.I)
 
 def _gemini_rank(name):
+    """시도 순서: 세대(3.x → 2.x) → 같은 세대 안에서 일반 모델 먼저, Lite는 뒤
+    → 높은 버전 먼저 → Pro → Flash → 정식 → 미리보기."""
     m = _GEMINI_TEXT_MODEL_RX.match(name)
     if not m:
-        return (2, (0, 0), 9, 9)
+        return ((1, 0), 9, (0, 0), 9, 9)
     ver = [int(x) for x in m.group(1).split(".")] + [0]
     tier, suffix = m.group(2), m.group(3) or ""
     is_lite = 1 if tier == "flash-lite" else 0
     tier_rank = {"pro": 0, "flash": 1, "flash-lite": 2}[tier]
     stab = 0 if suffix in ("", "latest") else 1 if suffix.isdigit() else 2 if suffix == "preview" else 3
-    return (is_lite, (-ver[0], -ver[1]), tier_rank, stab)
+    return ((0, -ver[0]), is_lite, (-ver[0], -ver[1]), tier_rank, stab)
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _list_gemini_models(api_key):
@@ -2065,42 +2069,75 @@ def _list_gemini_models(api_key):
 
 @st.cache_resource(show_spinner=False)
 def _gemini_model_state():
-    """서버 전체에서 공유하는 모델 상태: 없어진 모델(dead)과 잠시 쉬게 할 모델(cool)."""
-    return {"dead": {}, "cool": {}}
+    """서버 전체에서 공유하는 모델 상태: 건너뛸 모델(skip: 모델→다시 써 볼 시각)과 사유(why)."""
+    return {"skip": {}, "why": {}}
+
+def _pinned_models():
+    """Secrets에 GEMINI_MODEL = "gemini-3.7-flash" (또는 목록)을 넣으면 그 모델을 맨 먼저 씁니다."""
+    try:
+        v = st.secrets.get("GEMINI_MODEL", "")
+    except Exception:
+        return []
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return [x.strip() for x in str(v or "").split(",") if x.strip()]
 
 def gemini_model_ladder(api_key):
     try:
-        ladder = list(_list_gemini_models(api_key))
+        listed = list(_list_gemini_models(api_key))
     except Exception:
-        ladder = []
-    for name in GEMINI_FALLBACK_MODELS:
+        listed = []
+    ladder = []
+    for name in _pinned_models() + listed + GEMINI_FALLBACK_MODELS:
         if name not in ladder:
             ladder.append(name)
     return ladder
 
+def _classify_gemini_error(msg):
+    """오류를 (종류, 짧은 설명, 건너뛸 초)로 나눕니다."""
+    if _KEY_ERROR_RX.search(msg):
+        return "key", "API 키 오류", 0
+    if _RATE_LIMIT_RX.search(msg):
+        if _NO_QUOTA_RX.search(msg):
+            return "noquota", "429 이 키로는 사용 불가(한도 0)", 6 * 3600
+        if _DAILY_RX.search(msg):
+            return "rate", "429 하루 한도 소진", 3600
+        return "rate", "429 분당 한도", 60
+    if _MODEL_GONE_RX.search(msg):
+        return "gone", "404 사용 종료·접근 불가", 6 * 3600
+    if _BUSY_RX.search(msg):
+        return "busy", "503 서버 혼잡", 30
+    return "other", re.sub(r"\s+", " ", msg)[:90], 0
+
+def _gemini_try_once(client, model, contents, cfg):
+    resp = client.models.generate_content(model=model, contents=contents, config=cfg)
+    text = getattr(resp, "text", None)
+    if not (text and str(text).strip()):
+        raise RuntimeError("빈 응답(안전 필터 또는 출력 길이 한도)")
+    return text
+
 def _gemini_generate(contents, api_key, json_mode=False):
     """최신 모델부터 차례로 호출하고, 실패하면 다음(낮은) 모델로 내려갑니다.
-    - 404(모델 없음·지원 종료): 6시간 동안 그 모델을 건너뜁니다.
-    - 429(사용량 한도): 1분 동안 그 모델을 뒤로 미루고 바로 다음 모델을 씁니다.
+    - 404(사용 종료) · 한도 0(무료 키로 못 쓰는 모델): 6시간 건너뜀. 시도 횟수에 세지 않음.
+    - 429(한도) · 503(혼잡): 잠시 뒤로 미루고 바로 다음 모델.
     - API 키 오류: 어떤 모델도 소용없으므로 바로 알려 줍니다."""
     client = genai.Client(api_key=api_key)
     state = _gemini_model_state()
     now = time.time()
     ladder = gemini_model_ladder(api_key)
-    alive = [m for m in ladder if now - state["dead"].get(m, -1e9) > 6 * 3600] or ladder
-    ready = [m for m in alive if state["cool"].get(m, 0) <= now]
-    waiting = [m for m in alive if state["cool"].get(m, 0) > now]
-    order = (ready + waiting)[:GEMINI_MAX_TRIES]
+    ready = [m for m in ladder if state["skip"].get(m, 0) <= now]
+    later = sorted((m for m in ladder if state["skip"].get(m, 0) > now), key=lambda m: state["skip"][m])
+    order = ready + later           # 쉬는 중인 모델도 맨 끝에 한 번씩은 다시 시도
     cfg = types.GenerateContentConfig(response_mime_type="application/json") if json_mode else None
 
-    errors, rate_limited = [], False
+    log, real_fails, rate_limited, t0 = [], 0, False, time.time()
     for model in order:
+        if real_fails >= GEMINI_MAX_REAL_FAILS or time.time() - t0 > GEMINI_TIME_BUDGET:
+            break
         try:
-            resp = client.models.generate_content(model=model, contents=contents, config=cfg)
-            text = getattr(resp, "text", None)
-            if not (text and str(text).strip()):
-                raise RuntimeError("빈 응답(안전 필터 또는 출력 길이 한도)")
-            state["cool"].pop(model, None)
+            text = _gemini_try_once(client, model, contents, cfg)
+            state["skip"].pop(model, None)
+            state["why"].pop(model, None)
             try:
                 st.session_state["gemini_last_model"] = model
             except Exception:
@@ -2108,22 +2145,49 @@ def _gemini_generate(contents, api_key, json_mode=False):
             return text
         except Exception as e:
             msg = str(e)
-            errors.append(f"{model}: {msg[:200]}")
-            if _KEY_ERROR_RX.search(msg):
+            kind, short, wait = _classify_gemini_error(msg)
+            log.append(f"{model}: {short}")
+            if kind == "key":
                 raise Exception(f"Gemini API 키가 올바르지 않거나 만료되었습니다. ({msg[:200]})")
-            if _RATE_LIMIT_RX.search(msg):
+            if wait:
+                state["skip"][model] = time.time() + wait
+                state["why"][model] = short
+            if kind == "rate":
                 rate_limited = True
-                state["cool"][model] = time.time() + 60
-            elif _MODEL_GONE_RX.search(msg):
-                state["dead"][model] = time.time()
-            elif _BUSY_RX.search(msg):
-                time.sleep(2)
-            else:
+            if kind not in ("gone", "noquota"):
+                real_fails += 1
                 time.sleep(1)
     head = "429 RESOURCE_EXHAUSTED 사용량 한도 — " if rate_limited else ""
     raise Exception(
-        f"{head}AI 모델 통신 실패 (시도한 모델: {' → '.join(order)} / 마지막 에러: {errors[-1] if errors else '없음'})"
+        f"{head}AI 모델 통신 실패. 모델별 결과: " + " / ".join(log or ["시도할 모델이 없습니다"])
+        + " — 사이드바의 '🩺 AI 모델 연결 점검'으로 어떤 모델이 되는지 확인해 보세요."
     )
+
+def diagnose_gemini_models(api_key, limit=14):
+    """사이드바 점검용: 모델마다 아주 짧은 요청을 보내 실제로 되는지 확인합니다."""
+    client = genai.Client(api_key=api_key)
+    state = _gemini_model_state()
+    try:
+        _list_gemini_models.clear()        # 점검할 때는 모델 목록도 새로 받습니다.
+    except Exception:
+        pass
+    rows = []
+    for model in gemini_model_ladder(api_key)[:limit]:
+        t = time.time()
+        try:
+            _gemini_try_once(client, model, "OK라고만 답하세요.", None)
+            state["skip"].pop(model, None)
+            state["why"].pop(model, None)
+            rows.append({"모델": model, "결과": "✅ 사용 가능", "응답 시간": f"{time.time() - t:.1f}초"})
+        except Exception as e:
+            kind, short, wait = _classify_gemini_error(str(e))
+            if wait:
+                state["skip"][model] = time.time() + wait
+                state["why"][model] = short
+            rows.append({"모델": model, "결과": f"❌ {short}", "응답 시간": f"{time.time() - t:.1f}초"})
+            if kind == "key":
+                break
+    return rows
 
 def call_gemini(prompt, api_key, json_mode=False):
     if isinstance(prompt, bytes):
@@ -4896,6 +4960,15 @@ with st.sidebar:
         api_key = st.text_input("🔑 Gemini API Key", type="password")
     if st.session_state.get("gemini_last_model"):
         st.caption(f"🤖 최근 사용 AI 모델: {st.session_state['gemini_last_model']} (최신 모델 자동 선택)")
+    if api_key and st.button("🩺 AI 모델 연결 점검", width="stretch", key="gemini_diag_btn",
+                             help="최신 모델부터 아주 짧은 요청을 보내, 이 API 키로 실제로 쓸 수 있는 모델을 확인합니다."):
+        with st.spinner("모델마다 짧은 요청을 보내 확인하는 중입니다..."):
+            st.session_state["gemini_diag"] = diagnose_gemini_models(api_key)
+    if st.session_state.get("gemini_diag"):
+        with st.expander("🩺 모델 점검 결과", expanded=True):
+            st.dataframe(pd.DataFrame(st.session_state["gemini_diag"]), hide_index=True, width="stretch")
+            st.caption("✅ 모델 중 맨 위의 것이 자동으로 쓰입니다. 특정 모델을 고정하려면 Secrets에 "
+                       'GEMINI_MODEL = "모델이름" 을 넣으세요.')
 
     if exam_db.empty:
         st.warning("⚠️ 실제 기출 DB(master_interview_qa.csv)가 없습니다.\n앱과 같은 폴더에 파일을 넣어주세요.")
