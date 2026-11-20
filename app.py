@@ -3638,6 +3638,381 @@ def render_card_view(hl, student_name, uni, major, interview_type, difficulty, t
         st.warning(f"학생 연습 현황을 불러오지 못했습니다: {e}")
 
 # -------------------------------------------------------------------------
+# [2-0b] 🗂️ 면접 전날 최종 요약카드
+#   ① 핵심 개념 카드: 생기부에 나온 용어·개념의 뜻 + 몇 학년 어느 과목·활동에서 나왔는지
+#                     + 답변할 때 덧붙이면 좋은 말 + 예상 꼬리질문
+#   ② 학과 예상 질문 20선 + 모범답안 20선: 기출 DB의 같은·유사 학과 질문을 참고해
+#                     학과 빈출 질문 10개 + 이 학생 생기부 질문 10개
+#   AI 호출은 두 번(개념 / 질문)이며, 버튼을 눌렀을 때만 만듭니다(비용 절약).
+#   만든 카드는 기록 저장소에 'CARD-<묶음키>' 줄로 따로 저장해, 기록을 불러오면 다시 나옵니다.
+# -------------------------------------------------------------------------
+CARD_CONCEPT_RANGE = (14, 20)
+CARD_Q_TOTAL = 20
+CARD_Q_TYPES = ["전공 개념", "지원동기·진로", "생기부 활동", "인성·공동체", "시사·견해", "학업 태도"]
+
+def build_card_concept_prompt(record_text, uni, major):
+    lo, hi = CARD_CONCEPT_RANGE
+    return f"""당신은 {uni} {major} 학생부종합전형 면접 코치입니다. 아래 [생기부]를 읽고, 학생이 면접 전날 마지막으로 훑어볼 '핵심 개념 카드'를 만드세요.
+    JSON 하나만 출력하세요:
+    {{"개념": [{{"용어": "...", "분류": "전공 개념|이론·법칙|탐구 방법|책·인물|활동·프로그램", "설명": "...", "출처": [{{"학년": "1학년|2학년|3학년|학년 미상", "영역": "...", "내용": "..."}}], "덧붙일 말": "...", "꼬리질문": "..."}}]}}
+    규칙:
+    1. 생기부에 실제로 적힌 전문 용어·개념·이론·법칙·탐구 방법·책 제목을 {lo}~{hi}개 고르세요. 면접관이 "그게 무엇인가요?"라고 되물을 만한 것, {major} 전공과 이어지는 것을 우선합니다. "용어"는 생기부에 적힌 표기 그대로 쓰세요.
+    2. "설명": 그 개념의 정확한 뜻을 2~3문장으로 씁니다. 학생이 면접에서 그대로 말해도 틀리지 않을 만큼 정확하되, 고등학생이 이해할 수 있는 말로 쓰세요.
+    3. "출처": 그 용어가 나온 곳마다 하나씩 — "학년"(원문에서 알 수 없으면 "학년 미상"), "영역"(교과 세특-과목명 / 자율활동 / 동아리활동 / 진로활동 / 행동특성 및 종합의견 / 독서활동), "내용"(어떤 활동에서 어떻게 쓰였는지 한 문장). 원문에 없는 출처를 지어내지 마세요.
+    4. "덧붙일 말": 이 개념으로 답할 때 추가로 말하면 좋은 내용 1~2문장(개념의 한계, 실생활 사례, 관련 개념과의 차이, {major} 전공과의 연결 등). 생기부에 없는 활동을 했다고 말하게 하지 마세요.
+    5. "꼬리질문": 이 개념에 대해 면접관이 이어서 물을 질문 하나.
+    6. {major} 전공과 가까운 개념부터 나열하세요.
+
+    [생기부]
+    {record_text}
+    """
+
+def build_card_qa_prompt(record_text, uni, major, ref_lines, priority_text):
+    half = CARD_Q_TOTAL // 2
+    refs = "\n".join(ref_lines) if ref_lines else f"- (DB에 {major} 유사 학과 기출이 없습니다. {major} 면접에서 흔히 묻는 내용으로 직접 만드세요.)"
+    return f"""당신은 {uni} {major} 학생부종합전형 면접관이자 면접 코치입니다. {major} 지원자가 면접에서 받을 가능성이 높은 예상 질문 {CARD_Q_TOTAL}개와, 이 학생의 모범답안 {CARD_Q_TOTAL}개를 만드세요.
+    JSON 하나만 출력하세요:
+    {{"예상질문": [{{"질문": "...", "유형": "{'|'.join(CARD_Q_TYPES)}", "참고 기출": "K3", "근거": "...", "모범답안": "...", "핵심": ["...", "...", "..."]}}]}}
+    규칙:
+    1. 정확히 {CARD_Q_TOTAL}개. 앞의 {half}개는 '{major} 학과 면접 빈출 질문'(전공 기초 개념, 지원 동기, 입학 후 학업 계획, 전공 관련 시사 쟁점), 뒤의 {half}개는 '이 학생의 생기부를 파고드는 질문'입니다.
+    2. 아래 [실제 기출]에서 자주 나오는 질문 유형과 주제를 우선 반영하고, 참고한 기출 번호(K1, K2 …)를 "참고 기출"에 적으세요(없으면 빈 문자열). 기출 문장을 그대로 베끼지 말고 이 학생에게 맞게 바꾸세요.
+    3. 질문은 실제 면접관처럼 짧은 구어체 한두 문장입니다.
+    4. "근거": 모범답안이 기대는 생기부 내용(예: "2학년 생명과학Ⅰ 세특 – 효소 실험"). 생기부와 상관없는 질문이면 "없음".
+    5. "모범답안": 학생의 1인칭 구어체, 말했을 때 40~60초(4~6문장), 두괄식(결론 → 근거가 되는 생기부 활동 → 배운 점·전공 연결). 생기부에 있는 사실만 쓰고, 학생이 직접 채워야 할 부분은 [본인 경험: …]처럼 표시하세요. 전공 개념을 묻는 질문은 개념 설명이 정확해야 합니다.
+    6. "핵심": 답변에서 꼭 말해야 할 키워드 3개.
+    7. 참고: {priority_text}
+
+    [실제 기출 — {major} 및 유사 학과]
+    {refs}
+
+    [생기부]
+    {record_text}
+    """
+
+def _collect_items(raw, list_key, item_test):
+    items = []
+    for o in _extract_json_objects(raw):
+        if isinstance(o.get(list_key), list):
+            items.extend(x for x in o[list_key] if isinstance(x, dict))
+        elif item_test(o):
+            items.append(o)
+    return items
+
+def _norm_card_concepts(items, record_text):
+    rec_ns = _HL_SKIP_RX.sub("", str(record_text or ""))
+    out, seen = [], set()
+    for o in items:
+        term = re.sub(r"\s+", " ", str(o.get("용어", ""))).strip()
+        if not term or term in seen:
+            continue
+        seen.add(term)
+        srcs = []
+        for s in o.get("출처") or []:
+            if isinstance(s, str):
+                s = {"내용": s}
+            if not isinstance(s, dict):
+                continue
+            srcs.append({
+                "grade": str(s.get("학년", "") or "학년 미상").strip(),
+                "area": str(s.get("영역", "")).strip(),
+                "what": str(s.get("내용", "")).strip(),
+            })
+        core = _HL_SKIP_RX.sub("", re.sub(r"[(\[（].*?[)\]）]", "", term))
+        out.append({
+            "term": term, "kind": str(o.get("분류", "")).strip(), "desc": str(o.get("설명", "")).strip(),
+            "srcs": srcs, "add": str(o.get("덧붙일 말", "")).strip(), "follow": str(o.get("꼬리질문", "")).strip(),
+            "found": bool(core) and core in rec_ns,      # 생기부 원문에 실제로 있는 용어인지
+        })
+    return out
+
+def _norm_card_qas(items, refs):
+    out = []
+    for o in items:
+        q = re.sub(r"\s+", " ", str(o.get("질문", ""))).strip()
+        a = str(o.get("모범답안", "")).strip()
+        if not q or not a:
+            continue
+        keys = o.get("핵심")
+        keys = _as_list(keys) if isinstance(keys, list) else [k.strip() for k in re.split(r"[,·/]", str(keys or "")) if k.strip()]
+        ref_ids = re.findall(r"K\d+", str(o.get("참고 기출", "")))
+        typ = str(o.get("유형", ""))
+        out.append({
+            "q": q, "type": next((t for t in CARD_Q_TYPES if t in typ), typ.strip() or "기타"),
+            "basis": str(o.get("근거", "")).strip(), "answer": a, "keys": keys[:4],
+            "ref": ", ".join(dict.fromkeys(refs[r] for r in ref_ids if r in refs)),
+        })
+    return out[:CARD_Q_TOTAL]
+
+def make_interview_card(record_text, uni, major, student_name, profile, db, api_key):
+    """핵심 개념 카드와 예상 질문 20선을 만듭니다. 반환: (card dict, 오류 메시지)."""
+    rec = mask_personal(trim_record_for_review(record_text), student_name)[:40000]
+    share, _ = pick_allocation_basis(profile)
+    ex = get_relevant_examples(db, major, uni, top_n=30, type_share=share or None) if db is not None and not db.empty else None
+    refs, ref_lines = {}, []
+    if ex is not None and len(ex):
+        for i, (_, r) in enumerate(ex.iterrows(), 1):
+            k = f"K{i}"
+            refs[k] = f"{re.split(r'[(（]', str(r['대학']))[0].strip()} {r['학과']}"
+            ref_lines.append(f"- {k} [{r['대학']} · {r['학과']}] {re.sub(r'\s+', ' ', str(r['질문']))[:160]}")
+    errors, concepts, qas = [], [], []
+    try:
+        raw = _call_gemini_retry(build_card_concept_prompt(rec, uni, major), api_key, json_mode=True)
+        concepts = _norm_card_concepts(_collect_items(raw, "개념", lambda o: "용어" in o), record_text)
+        if not concepts:
+            errors.append("핵심 개념을 읽지 못했습니다")
+    except Exception as e:
+        errors.append("핵심 개념: " + _friendly_error(e))
+    try:
+        raw = _call_gemini_retry(
+            build_card_qa_prompt(rec, uni, major, ref_lines, highlight_priority_text(profile, uni)), api_key, json_mode=True)
+        qas = _norm_card_qas(_collect_items(raw, "예상질문", lambda o: isinstance(o.get("질문"), str)), refs)
+        if not qas:
+            errors.append("예상 질문을 읽지 못했습니다")
+    except Exception as e:
+        errors.append("예상 질문: " + _friendly_error(e))
+    if not concepts and not qas:
+        return None, " / ".join(errors)
+    card = {"v": 1, "uni": uni, "major": major, "made": _kst_stamp(), "concepts": concepts, "qas": qas,
+            "n_refs": len(refs)}
+    return card, " / ".join(errors)
+
+def _card_cell(cell, paras, fill=None):
+    """paras: [(글, 크기, 굵게, 색)] — 한 칸에 문단 여러 개."""
+    set_cell_margins(cell, top=60, bottom=60, left=90, right=90)
+    if fill:
+        set_cell_background(cell, fill)
+    for i, (text, size, bold, color) in enumerate(paras):
+        p = cell.paragraphs[0] if i == 0 else cell.add_paragraph()
+        p.paragraph_format.space_before = Pt(1)
+        p.paragraph_format.space_after = Pt(1)
+        p.paragraph_format.line_spacing = 1.15
+        r = p.add_run(str(text))
+        r.font.size = Pt(size)
+        r.bold = bold
+        if color is not None:
+            r.font.color.rgb = color
+
+def _repeat_header(row):
+    tr_pr = row._tr.get_or_add_trPr()
+    el = OxmlElement("w:tblHeader")
+    el.set(qn("w:val"), "true")
+    tr_pr.append(el)
+
+_GRAY = RGBColor(0x60, 0x60, 0x60)
+_NAVY = RGBColor(0, 51, 102)
+_RED = RGBColor(0xC6, 0x28, 0x28)
+
+def create_interview_card_word(card, student_name, target_desc, info_row=None, keywords=None):
+    from docx.shared import Cm
+    from docx.enum.text import WD_BREAK
+    doc = Document()
+    set_document_font(doc)
+    sec = doc.sections[0]
+    sec.page_width, sec.page_height = Cm(21.0), Cm(29.7)
+    sec.left_margin = sec.right_margin = Cm(1.4)
+    sec.top_margin = sec.bottom_margin = Cm(1.3)
+
+    doc.add_heading(f"🗂️ [{student_name}] {card.get('uni', '')} {card.get('major', '')} 면접 전날 최종 요약카드", level=1)
+    meta = doc.add_paragraph()
+    run = meta.add_run(f"핵심 개념 {len(card.get('concepts', []))}개 · 예상 질문 {len(card.get('qas', []))}선 · 만든 날 {card.get('made', '')}")
+    run.font.size = Pt(9)
+    run.font.color.rgb = _GRAY
+    if info_row is not None:
+        bits = []
+        for col in ("면접유형", "면접시간", "면접위원"):
+            v = str(info_row.get(col, "") or "").strip()
+            if v and v.lower() != "nan":
+                bits.append(f"{col} {v}")
+        if bits:
+            p = doc.add_paragraph()
+            r = p.add_run("📋 면접 형식: " + " · ".join(bits))
+            r.font.size = Pt(9.5)
+            r.bold = True
+    if keywords:
+        p = doc.add_paragraph()
+        r = p.add_run("🔑 핵심 키워드: " + " · ".join(keywords))
+        r.font.size = Pt(9.5)
+        r.bold = True
+        r.font.color.rgb = _NAVY
+
+    concepts = card.get("concepts") or []
+    if concepts:
+        doc.add_heading("1. 생기부 핵심 개념 카드", level=2)
+        note = doc.add_paragraph()
+        nr = note.add_run("면접관이 \"그게 무엇인가요?\"라고 되물을 수 있는 용어입니다. 뜻을 소리 내어 30초 안에 말할 수 있는지 확인하세요.")
+        nr.font.size = Pt(8.5)
+        nr.font.color.rgb = _GRAY
+        t = doc.add_table(rows=1, cols=4)
+        t.style = "Table Grid"
+        for i, h in enumerate(["개념", "뜻", "어디서 나왔나 (학년 · 과목 · 내용)", "답변에 덧붙일 말 · 꼬리질문"]):
+            _card_cell(t.rows[0].cells[i], [(h, 9, True, RGBColor(255, 255, 255))], fill="1C4532")
+        _repeat_header(t.rows[0])
+        for n, c in enumerate(concepts, 1):
+            cells = t.add_row().cells
+            term_paras = [(f"{n}. {c['term']}", 9.5, True, _NAVY)]
+            if c.get("kind"):
+                term_paras.append((c["kind"], 7.5, False, _GRAY))
+            if not c.get("found"):
+                term_paras.append(("⚠️ 원문 표기 확인", 7.5, False, _RED))
+            _card_cell(cells[0], term_paras, fill="F4F6F9")
+            _card_cell(cells[1], [(c.get("desc") or "-", 8.5, False, None)])
+            src_paras = []
+            for s in c.get("srcs") or []:
+                src_paras.append((f"{s['grade']} · {s['area']}".strip(" ·"), 8, True, None))
+                if s.get("what"):
+                    src_paras.append((s["what"], 8, False, _GRAY))
+            _card_cell(cells[2], src_paras or [("-", 8, False, None)])
+            add_paras = [(c.get("add") or "-", 8.5, False, None)]
+            if c.get("follow"):
+                add_paras.append(("🔥 " + c["follow"], 8, False, _RED))
+            _card_cell(cells[3], add_paras)
+        _set_col_widths(t, [2.8, 5.2, 4.6, 5.6])
+
+    qas = card.get("qas") or []
+    if qas:
+        doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+        doc.add_heading(f"2. {card.get('major', '')} 예상 질문 {len(qas)}선 · 모범답안", level=2)
+        note = doc.add_paragraph()
+        nr = note.add_run("앞쪽은 학과 면접 빈출 질문, 뒤쪽은 생기부 질문입니다. [본인 경험: …] 부분은 자기 말로 채워 연습하세요.")
+        nr.font.size = Pt(8.5)
+        nr.font.color.rgb = _GRAY
+        t = doc.add_table(rows=1, cols=3)
+        t.style = "Table Grid"
+        for i, h in enumerate(["번호", "예상 질문", "모범답안"]):
+            _card_cell(t.rows[0].cells[i], [(h, 9, True, RGBColor(255, 255, 255))], fill="1C4532")
+        _repeat_header(t.rows[0])
+        for n, qa in enumerate(qas, 1):
+            cells = t.add_row().cells
+            _card_cell(cells[0], [(str(n), 10, True, _NAVY)], fill="F4F6F9")
+            q_paras = [(qa["q"], 9, True, None), (qa.get("type", ""), 7.5, False, _GRAY)]
+            if qa.get("basis") and qa["basis"] != "없음":
+                q_paras.append(("근거: " + qa["basis"], 7.5, False, _GRAY))
+            if qa.get("ref"):
+                q_paras.append(("기출 참고: " + qa["ref"], 7.5, False, _GRAY))
+            _card_cell(cells[1], q_paras)
+            a_paras = [(qa["answer"], 8.5, False, None)]
+            if qa.get("keys"):
+                a_paras.append(("핵심: " + " · ".join(qa["keys"]), 8, True, _NAVY))
+            _card_cell(cells[2], a_paras)
+        _set_col_widths(t, [1.0, 5.4, 11.8])
+
+        doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+        doc.add_heading("3. 질문만 보기 (마지막 자가 점검)", level=2)
+        for n, qa in enumerate(qas, 1):
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(3)
+            p.add_run(f"□ {n}. ").bold = True
+            p.add_run(qa["q"])
+        for c in concepts:
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(2)
+            p.add_run("□ 개념: ").bold = True
+            p.add_run(f"{c['term']} — 30초 안에 뜻을 말할 수 있나요?")
+
+    path = _out_path(f"{student_name}_{target_desc}_면접전날_요약카드.docx")
+    doc.save(path)
+    return path
+
+def _card_keywords():
+    return list(((st.session_state.get("highlight_data") or {}).get("keywords")) or [])
+
+def set_interview_card_state(card, student_name, target_desc, uni, major):
+    st.session_state.interview_card = card
+    st.session_state.interview_card_file = None
+    if card:
+        try:
+            info = get_univ_info(univ_info_db, uni, major)
+        except Exception:
+            info = None
+        st.session_state.interview_card_file = create_interview_card_word(
+            card, student_name, target_desc, info_row=info, keywords=_card_keywords())
+
+def save_interview_card(record_id, student_name, uni, major, card):
+    if not record_id or not card:
+        return
+    try:
+        _save_json_row(f"{CARD_PREFIX}{_bundle_key(record_id)}", student_name, uni, major, "면접카드", card)
+    except Exception as e:
+        st.session_state.interview_card_error = f"요약카드는 만들었지만 저장하지 못했습니다(다시 불러오면 사라질 수 있음): {e}"
+
+def load_interview_card(record_id):
+    try:
+        _, obj = _load_json_row(f"{CARD_PREFIX}{_bundle_key(record_id)}")
+    except Exception:
+        return None
+    return obj if (obj.get("concepts") or obj.get("qas")) else None
+
+def render_interview_card_section(student_name, uni, major, target_desc, api_key):
+    st.markdown("### 🗂️ 면접 전날 최종 요약카드")
+    st.caption("생기부 속 용어·개념의 뜻과 출처(학년·과목·내용), 답변에 덧붙일 말, "
+               f"{major or '지원 학과'} 예상 질문 {CARD_Q_TOTAL}선과 모범답안을 한 문서로 묶습니다.")
+    card = st.session_state.get("interview_card")
+    rec = st.session_state.get("loaded_student_record_text", "")
+    if card and (card.get("uni"), card.get("major")) != (uni, major):
+        st.info(f"이 카드는 {card.get('uni')} {card.get('major')} 기준으로 만든 것입니다. 지원 대학·학과를 바꿨다면 다시 만들어 주세요.")
+    b1, b2 = st.columns([2, 3], vertical_alignment="center")
+    with b1:
+        label = "🔄 요약카드 다시 만들기" if card else "🗂️ 요약카드 만들기"
+        go = st.button(label, width="stretch", key="make_interview_card",
+                       disabled=not api_key or not rec.strip() or not major)
+    with b2:
+        if not rec.strip():
+            st.caption("생기부 원문이 없습니다. 생기부 PDF를 올리고 면접 패키지를 먼저 만들어 주세요.")
+        elif not card:
+            st.caption("AI를 두 번 불러 만듭니다(1~2분).")
+    if go:
+        with st.spinner(f"핵심 개념과 {major} 예상 질문 {CARD_Q_TOTAL}선을 만드는 중입니다... (1~2분)"):
+            new_card, err = make_interview_card(
+                rec, uni, major, student_name, cached_interview_profile(APP_DIR, uni, major), exam_db, api_key)
+        st.session_state.interview_card_error = err
+        if new_card:
+            set_interview_card_state(new_card, student_name, target_desc, uni, major)
+            save_interview_card(st.session_state.get("current_record_id"), student_name, uni, major, new_card)
+        st.rerun()
+    if st.session_state.get("interview_card_error"):
+        st.warning(st.session_state.interview_card_error)
+    if not card:
+        return
+
+    path = st.session_state.get("interview_card_file")
+    if path and os.path.exists(path):
+        with open(path, "rb") as f:
+            st.download_button("🗂️ 면접 전날 요약카드 다운로드 (.docx)", f, file_name=os.path.basename(path),
+                               width="stretch", key="dl_interview_card_inline")
+    concepts, qas = card.get("concepts") or [], card.get("qas") or []
+    tab_c, tab_q = st.tabs([f"🔤 핵심 개념 {len(concepts)}개", f"❓ 예상 질문 {len(qas)}선"])
+    with tab_c:
+        with st.container(height=700, border=False):
+            for n, c in enumerate(concepts, 1):
+                with st.container(border=True):
+                    warn = " :red[⚠️ 원문 표기 확인]" if not c.get("found") else ""
+                    kind = f" :gray[{c['kind']}]" if c.get("kind") else ""
+                    st.markdown(f"**{n}. {_md_safe(c['term'])}**{kind}{warn}  \n{_md_safe(c.get('desc', ''))}")
+                    if c.get("srcs"):
+                        st.markdown("  \n".join(
+                            f"📍 **{_md_safe(s['grade'])} · {_md_safe(s['area'])}** — {_md_safe(s.get('what', ''))}"
+                            for s in c["srcs"]))
+                    if c.get("add"):
+                        st.markdown(f"➕ **덧붙일 말** {_md_safe(c['add'])}")
+                    if c.get("follow"):
+                        st.caption(f"🔥 꼬리질문: {c['follow']}")
+    with tab_q:
+        open_all = st.toggle("모범답안 모두 펼치기", key="card_open_all")
+        with st.container(height=700, border=False):
+            for n, qa in enumerate(qas, 1):
+                with st.container(border=True):
+                    meta = [qa.get("type", "")]
+                    if qa.get("basis") and qa["basis"] != "없음":
+                        meta.append("근거 " + qa["basis"])
+                    if qa.get("ref"):
+                        meta.append("기출 참고 " + qa["ref"])
+                    st.markdown(f"**{n}. {_md_safe(qa['q'])}**  \n:gray[{_md_safe(' · '.join(m for m in meta if m))}]")
+                    with st.expander("✅ 모범답안 보기", expanded=open_all):
+                        st.markdown(_md_safe(qa["answer"]))
+                        if qa.get("keys"):
+                            st.caption("핵심: " + " · ".join(qa["keys"]))
+
+# -------------------------------------------------------------------------
 # [2-1] 생성된 문항에서 [질문]/[문제 N] ↔ [모범답안]/[모범답안 N] 쌍만 순서대로 뽑아내기
 #   (구글 시트 Apps Script의 _extractQAPairs와 동일한 로직의 파이썬 버전)
 # -------------------------------------------------------------------------
@@ -4011,6 +4386,9 @@ if "card_checks" not in st.session_state: st.session_state.card_checks = {}
 if "summary_card_file" not in st.session_state: st.session_state.summary_card_file = None
 if "growth_report_file" not in st.session_state: st.session_state.growth_report_file = None
 if "evaluation_sheet_file" not in st.session_state: st.session_state.evaluation_sheet_file = None
+if "interview_card" not in st.session_state: st.session_state.interview_card = None
+if "interview_card_file" not in st.session_state: st.session_state.interview_card_file = None
+if "interview_card_error" not in st.session_state: st.session_state.interview_card_error = ""
 if "last_save_info" not in st.session_state: st.session_state.last_save_info = None
 
 # =========================================================================
@@ -4027,6 +4405,7 @@ import secrets as _pysecrets
 import wave as _wave
 
 STU_PREFIX, ANS_PREFIX, CMT_PREFIX = "STU-", "ANS-", "CMT-"
+CARD_PREFIX = "CARD-"            # 면접 전날 요약카드
 STU_DAILY_LIMIT = 30
 FB_CRITERIA = ["근거", "구조", "구체성", "전공연결"]
 FB_CRITERIA_HELP = {
@@ -4041,7 +4420,7 @@ _ROW_TOTAL = 76000             # 한 줄(result_text + chat_history)에 넣을 �
 
 
 def is_practice_id(rid):
-    return str(rid or "").startswith((STU_PREFIX, ANS_PREFIX, CMT_PREFIX))
+    return str(rid or "").startswith((STU_PREFIX, ANS_PREFIX, CMT_PREFIX, CARD_PREFIX))
 
 
 def _bundle_key(record_id):
@@ -5108,6 +5487,14 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                     st.session_state["summary_card_file"] = None
                     st.session_state["growth_report_file"] = None
                     st.session_state["evaluation_sheet_file"] = None
+                    st.session_state["interview_card_error"] = ""
+                    try:
+                        set_interview_card_state(load_interview_card(row["id"]), _ld_name, _ld_desc,
+                                                 row["university"], row["major"])
+                    except Exception as e:
+                        st.session_state["interview_card"] = None
+                        st.session_state["interview_card_file"] = None
+                        st.session_state["interview_card_error"] = f"저장된 요약카드를 불러오지 못했습니다: {e}"
                     if row["result_text"]:
                         loaded_type = _rec_get(row, "interview_type", "생기부 기반 면접")
                         stu_path, tea_path = create_word_files(
@@ -5702,6 +6089,9 @@ if st.button("🚀 면접 패키지 생성 시작"):
 
             # 새로 문항을 생성했으니 이전 학생의 성장 리포트 파일은 초기화
             st.session_state.growth_report_file = None
+            st.session_state.interview_card = None
+            st.session_state.interview_card_file = None
+            st.session_state.interview_card_error = ""
 
             display_text = to_display_text(result_text)
 
@@ -5842,6 +6232,8 @@ if st.session_state.chat_history:
             downloadable.append(("📚 생기부 쉬운 해설 (.docx)", st.session_state.easy_explanation_file))
         if st.session_state.get("evaluation_sheet_file"):
             downloadable.append(("📝 교사용 평가표 (.docx)", st.session_state.evaluation_sheet_file))
+        if interview_type == "생기부 기반 면접" and st.session_state.get("interview_card_file"):
+            downloadable.append(("🗂️ 면접 전날 요약카드 (.docx)", st.session_state.interview_card_file))
         if st.session_state.get("growth_report_file"):
             downloadable.append(("📈 학생 성장 리포트 (.docx)", st.session_state.growth_report_file))
         # 피드백 대화는 실제로 주고받은 내용이 있을 때만 내려받기를 보여 줍니다.
@@ -5923,6 +6315,13 @@ if st.session_state.chat_history:
     if st.session_state.get("easy_explanation_text"):
         with st.expander("📚 생기부 쉬운 해설 미리보기 (고등학교 1학년 눈높이)", expanded=False):
             st.markdown(st.session_state.easy_explanation_text)
+
+    if interview_type == "생기부 기반 면접":
+        st.divider()
+        try:
+            render_interview_card_section(student_name, uni, major, target_desc, api_key)
+        except Exception as e:
+            st.warning(f"요약카드 화면을 그리지 못했습니다: {e}")
 
     # -------------------------------------------------------------------
     # 📝 교사용 면접 평가표 (인쇄해서 손으로 채점하는 양식)
