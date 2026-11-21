@@ -4013,6 +4013,286 @@ def render_interview_card_section(student_name, uni, major, target_desc, api_key
                             st.caption("핵심: " + " · ".join(qa["keys"]))
 
 # -------------------------------------------------------------------------
+# [2-0c] 📋 대학 맞춤 면접 질문지 (학생용: 질문 + 생기부 출처 / 교사용: + 모범답안)
+#   지원 대학의 실제 질문 방식(말투·길이·압박 수위)과 지원 학과 기출의 전공 깊이를
+#   build_reference_strategy로 가져와, 이 학생의 생기부 문장에서 질문을 뽑습니다.
+#   질문마다 근거 생기부 문장을 원문 그대로 인용하고, 원문에 실제로 있는지 확인합니다.
+#   만든 질문지는 'QSHEET-<묶음키>' 줄로 따로 저장합니다.
+# -------------------------------------------------------------------------
+QSHEET_COUNTS = [10, 15, 20]
+QSHEET_EVAL = ["학업역량", "전공적합성", "인성", "발전가능성"]
+
+def default_qsheet_count(info_row):
+    """면접 시간에 맞춰 기본 문항 수를 정합니다(10분 이하 10개, 20분 이상 20개)."""
+    try:
+        mins = [int(x) for x in re.findall(r"(\d+)\s*분", str(info_row.get("면접시간", "")))]
+    except Exception:
+        mins = []
+    if not mins:
+        return 15
+    m = max(mins)
+    return 10 if m <= 10 else 20 if m >= 20 else 15
+
+def build_qsheet_prompt(record_text, uni, major, n, ref_text, univ_text):
+    return f"""당신은 {uni} {major} 학생부종합전형 면접관입니다. 아래 [참고자료]로 이 대학의 실제 질문 방식(말투·길이·압박 수위·꼬리질문 깊이)과 {major} 전공 질문의 깊이를 익힌 뒤, 이 학생의 [생기부]에서 질문 {n}개를 뽑아 '실제 면접 질문지'를 만드세요.
+    {univ_text}
+    {ref_text}
+
+    JSON 하나만 출력하세요:
+    {{"질문지": [{{"질문": "...", "유형": "...", "평가요소": "{'|'.join(QSHEET_EVAL)}", "출처": {{"학년": "1학년|2학년|3학년|학년 미상", "영역": "...", "원문": "..."}}, "대학 스타일": "...", "모범답안": "...", "핵심": ["...", "...", "..."], "꼬리질문": "...", "피할 답변": "..."}}]}}
+    규칙:
+    1. 정확히 {n}개, 실제 면접 흐름 순서로 나열하세요. 첫 1~2개는 지원 동기·전공 관심(생기부 근거), 이어서 생기부 영역(교과 세특·자율·동아리·진로·행동특성·독서)을 고르게 다루고, 마지막 1개는 입학 후 계획이나 마무리 질문입니다.
+    2. "질문": 이 대학 면접관이 실제로 말하듯 쓰세요(참고자료 A의 말투·길이). 다른 대학의 말투나 다른 학과의 전공 내용을 섞지 마세요. 기출 문장을 그대로 베끼지 말고 이 학생의 생기부 내용으로 바꾸세요.
+    3. "출처": "원문"은 질문의 근거가 된 생기부 문장을 글자 하나 바꾸지 말고 20~60자 그대로 옮기세요. "영역"은 과목명까지(예: "교과 세특-생명과학Ⅰ", "동아리활동", "행동특성 및 종합의견"). "학년"은 원문에서 확인될 때만 쓰고 아니면 "학년 미상". 생기부와 무관한 질문이면 "원문"을 빈 문자열로 두세요.
+    4. "유형": 참고자료의 출제 유형 이름(예: 활동 심화형, 전공 개념형, 지원 동기형 등)으로 적고, [실제 출제 유형 분석]이나 [유형 배분]이 있으면 그 비중을 {n}개 전체에 비례해 반영하세요.
+    5. "대학 스타일": 이 질문을 왜 이렇게 물었는지 한 문장(예: "이 대학은 활동의 한계와 개선 방안을 되묻는 경우가 많음").
+    6. "모범답안": 학생 1인칭 구어체, 말했을 때 40~60초(4~6문장), 두괄식(결론 → 생기부 근거 → 배운 점·전공 연결). 생기부에 있는 사실만 쓰고, 학생이 채워야 할 부분은 [본인 경험: …]으로 표시하세요.
+    7. "핵심": 답변에서 꼭 말할 키워드 3개. "꼬리질문": 답변 직후 이어질 압박 질문 하나. "피할 답변": 감점되는 답변 유형 한 문장.
+
+    [생기부]
+    {record_text}
+    """
+
+def _norm_qsheet(items, record_text):
+    rec_ns = _HL_SKIP_RX.sub("", str(record_text or ""))
+    out = []
+    for o in items:
+        q = re.sub(r"\s+", " ", str(o.get("질문", ""))).strip()
+        if not q:
+            continue
+        src = o.get("출처") or {}
+        if isinstance(src, str):
+            src = {"원문": src}
+        quote = re.sub(r"\s+", " ", str(src.get("원문", "") or "")).strip().strip("\"'“”‘’")
+        qn_ = _HL_SKIP_RX.sub("", quote)
+        if not qn_:
+            found = None                      # 생기부와 무관한 질문(마무리 등)
+        elif qn_ in rec_ns:
+            found = True
+        else:                                 # 앞뒤 절반 중 한쪽이라도 원문에 있으면 '대체로 일치'
+            h = max(8, len(qn_) // 2)
+            found = "partial" if (qn_[:h] in rec_ns or qn_[-h:] in rec_ns) else False
+        ev = str(o.get("평가요소", ""))
+        keys = o.get("핵심")
+        keys = _as_list(keys) if isinstance(keys, list) else [k.strip() for k in re.split(r"[,·/]", str(keys or "")) if k.strip()]
+        out.append({
+            "q": q, "type": str(o.get("유형", "")).strip(),
+            "eval": next((e for e in QSHEET_EVAL if e in ev), ev.strip()),
+            "grade": str(src.get("학년", "") or "").strip() or ("학년 미상" if quote else ""),
+            "area": str(src.get("영역", "") or "").strip(), "quote": quote, "found": found,
+            "style": str(o.get("대학 스타일", "")).strip(), "answer": str(o.get("모범답안", "")).strip(),
+            "keys": keys[:4], "follow": str(o.get("꼬리질문", "")).strip(), "avoid": str(o.get("피할 답변", "")).strip(),
+        })
+    return out
+
+def make_question_sheet(record_text, uni, major, student_name, n, db, info_row, api_key):
+    """대학 맞춤 면접 질문지를 만듭니다. 반환: (sheet dict, 오류 메시지)."""
+    rec = mask_personal(trim_record_for_review(record_text), student_name)[:40000]
+    ref = build_reference_strategy(db, uni, major, top_n=12, style_n=8)
+    try:
+        raw = _call_gemini_retry(
+            build_qsheet_prompt(rec, uni, major, n, ref.get("prompt_text", ""), format_univ_info_for_prompt(info_row)),
+            api_key, json_mode=True)
+    except Exception as e:
+        return None, "질문지: " + _friendly_error(e)
+    qs = _norm_qsheet(_collect_items(raw, "질문지", lambda o: isinstance(o.get("질문"), str)), record_text)
+    if not qs:
+        return None, "AI 응답에서 질문을 읽지 못했습니다. 다시 만들어 주세요."
+    style = ref.get("style") or {}
+    mode_label = {"exact": f"{uni} {major} 실제 기출 기준",
+                  "style_transfer": f"{uni} 다른 학과 기출의 질문 방식 + 타 대학 {major} 기출의 전공 깊이",
+                  "uni_only": f"{uni} 질문 방식 기준(유사 학과 기출 없음)",
+                  "dept_only": f"타 대학 {major} 기출 기준({uni} 기출 없음)"}.get(ref.get("mode"), "기출 자료 부족 — 생기부 중심")
+    style_line = ""
+    if style:
+        tops = ", ".join(f"{t} {r}%" for t, r in style.get("대표유형", []))
+        style_line = f"{uni} 기출 {style.get('기출수', 0)}개 분석 · 자주 묻는 유형: {tops} · 평균 질문 길이 {style.get('평균질문길이', 0)}자"
+    sheet = {"v": 1, "uni": uni, "major": major, "made": _kst_stamp(), "n": n, "qs": qs,
+             "basis": mode_label, "style_line": style_line}
+    miss = sum(1 for q in qs if q["found"] is False)
+    warn = f"근거 문장 {miss}개가 생기부 원문과 정확히 맞지 않아 ⚠️ 표시했습니다." if miss else ""
+    return sheet, warn
+
+def _src_line(q):
+    return " · ".join(x for x in (q.get("grade"), q.get("area")) if x)
+
+def _found_mark(q):
+    return {True: "", "partial": " (원문과 일부 다름)", False: " ⚠️ 원문 확인 필요", None: ""}.get(q.get("found"), "")
+
+def create_question_sheet_word(sheet, student_name, target_desc, is_teacher=False, info_row=None):
+    from docx.shared import Cm
+    doc = Document()
+    set_document_font(doc)
+    sec = doc.sections[0]
+    sec.page_width, sec.page_height = Cm(21.0), Cm(29.7)
+    sec.left_margin = sec.right_margin = Cm(1.4)
+    sec.top_margin = sec.bottom_margin = Cm(1.3)
+    uni, major, qs = sheet.get("uni", ""), sheet.get("major", ""), sheet.get("qs") or []
+    doc.add_heading(f"📋 [{student_name}] {uni} {major} 면접 질문지 ({'교사용 · 모범답안 포함' if is_teacher else '학생용'})", level=1)
+    meta = doc.add_paragraph()
+    mr = meta.add_run(f"질문 {len(qs)}개 · 출제 기준: {sheet.get('basis', '')} · 만든 날 {sheet.get('made', '')}")
+    mr.font.size = Pt(8.5)
+    mr.font.color.rgb = _GRAY
+    if info_row is not None:
+        bits = []
+        for col in ("면접유형", "면접시간", "면접위원"):
+            v = str(info_row.get(col, "") or "").strip()
+            if v and v.lower() != "nan":
+                bits.append(f"{col} {v}")
+        if bits:
+            r = doc.add_paragraph().add_run("📋 면접 형식: " + " · ".join(bits))
+            r.font.size = Pt(9.5)
+            r.bold = True
+    if is_teacher and sheet.get("style_line"):
+        r = doc.add_paragraph().add_run("🏫 대학 스타일: " + sheet["style_line"])
+        r.font.size = Pt(9)
+        r.font.color.rgb = _NAVY
+    guide = doc.add_paragraph()
+    gr = guide.add_run(
+        "질문 순서는 실제 면접 흐름대로입니다. 질문마다 근거 생기부 문장(📍)을 함께 적었으니 그 부분을 다시 읽고 소리 내어 답해 보세요."
+        if not is_teacher else
+        "학생용과 같은 순서입니다. 모의면접 때 질문을 읽고, 답변 뒤 🔥 꼬리질문으로 압박해 보세요. ✖ 피할 답변이 나오면 바로 짚어 주세요.")
+    gr.font.size = Pt(8.5)
+    gr.font.color.rgb = _GRAY
+
+    if is_teacher:
+        t = doc.add_table(rows=1, cols=3)
+        heads, widths = ["번호", "질문 · 생기부 출처", "모범답안 · 꼬리질문"], [1.0, 6.4, 10.8]
+    else:
+        t = doc.add_table(rows=1, cols=3)
+        heads, widths = ["번호", "예상 질문", "이 질문이 나온 생기부 (📍 학년 · 영역 · 원문)"], [1.0, 9.0, 8.2]
+    t.style = "Table Grid"
+    for i, h in enumerate(heads):
+        _card_cell(t.rows[0].cells[i], [(h, 9, True, RGBColor(255, 255, 255))], fill="1F3864")
+    _repeat_header(t.rows[0])
+    for n, q in enumerate(qs, 1):
+        cells = t.add_row().cells
+        _card_cell(cells[0], [(str(n), 10, True, _NAVY)], fill="F4F6F9")
+        src_paras = []
+        if q.get("quote") or _src_line(q):
+            src_paras.append(("📍 " + (_src_line(q) or "생기부") + _found_mark(q), 8, True,
+                              _RED if q.get("found") is False else None))
+            if q.get("quote"):
+                src_paras.append((f"“{q['quote']}”", 8, False, _GRAY))
+        if is_teacher:
+            paras = [(q["q"], 9, True, None),
+                     (" · ".join(x for x in (q.get("type"), q.get("eval")) if x), 7.5, False, _GRAY)]
+            paras += src_paras
+            if q.get("style"):
+                paras.append(("🏫 " + q["style"], 7.5, False, _NAVY))
+            _card_cell(cells[1], paras)
+            a = [(q.get("answer") or "-", 8.5, False, None)]
+            if q.get("keys"):
+                a.append(("핵심: " + " · ".join(q["keys"]), 8, True, _NAVY))
+            if q.get("follow"):
+                a.append(("🔥 꼬리질문: " + q["follow"], 8, False, _RED))
+            if q.get("avoid"):
+                a.append(("✖ 피할 답변: " + q["avoid"], 7.5, False, _GRAY))
+            _card_cell(cells[2], a)
+        else:
+            _card_cell(cells[1], [(q["q"], 9.5, True, None), ("□ 자신 있음   □ 애매   □ 모름", 7.5, False, _GRAY)])
+            _card_cell(cells[2], src_paras or [("생기부 전체 (지원 동기·마무리 질문)", 8, False, _GRAY)])
+    _set_col_widths(t, widths)
+    path = _out_path(f"{student_name}_{target_desc}_면접질문지_{'교사용' if is_teacher else '학생용'}.docx")
+    doc.save(path)
+    return path
+
+def set_question_sheet_state(sheet, student_name, target_desc, uni, major):
+    st.session_state.qsheet = sheet
+    st.session_state.qsheet_files = None
+    if sheet:
+        try:
+            info = get_univ_info(univ_info_db, uni, major)
+        except Exception:
+            info = None
+        st.session_state.qsheet_files = (
+            create_question_sheet_word(sheet, student_name, target_desc, False, info),
+            create_question_sheet_word(sheet, student_name, target_desc, True, info),
+        )
+
+def save_question_sheet(record_id, student_name, uni, major, sheet):
+    if not record_id or not sheet:
+        return
+    try:
+        _save_json_row(f"{QSHEET_PREFIX}{_bundle_key(record_id)}", student_name, uni, major, "면접질문지", sheet)
+    except Exception as e:
+        st.session_state.qsheet_error = f"질문지는 만들었지만 저장하지 못했습니다(다시 불러오면 사라질 수 있음): {e}"
+
+def load_question_sheet(record_id):
+    try:
+        _, obj = _load_json_row(f"{QSHEET_PREFIX}{_bundle_key(record_id)}")
+    except Exception:
+        return None
+    return obj if obj.get("qs") else None
+
+def render_question_sheet_section(student_name, uni, major, target_desc, api_key):
+    st.markdown("### 📋 대학 맞춤 면접 질문지")
+    st.caption(f"{uni or '지원 대학'}의 실제 질문 방식과 {major or '지원 학과'} 기출의 전공 깊이로, 이 학생 생기부에서 질문을 뽑습니다. "
+               "학생용은 질문과 근거 생기부 문장만, 교사용은 모범답안·꼬리질문·피할 답변까지 넣습니다.")
+    sheet = st.session_state.get("qsheet")
+    rec = st.session_state.get("loaded_student_record_text", "")
+    try:
+        info = get_univ_info(univ_info_db, uni, major)
+    except Exception:
+        info = None
+    if sheet and (sheet.get("uni"), sheet.get("major")) != (uni, major):
+        st.info(f"이 질문지는 {sheet.get('uni')} {sheet.get('major')} 기준입니다. 지원 대학·학과를 바꿨다면 다시 만들어 주세요.")
+    b0, b1, b2 = st.columns([1.2, 2, 2.8], vertical_alignment="bottom")
+    with b0:
+        default_n = default_qsheet_count(info) if info is not None else 15
+        n = st.selectbox("문항 수", QSHEET_COUNTS, index=QSHEET_COUNTS.index(default_n), key="qsheet_n",
+                         help="지원 대학의 면접 시간에 맞춰 기본값을 정했습니다.")
+    with b1:
+        go = st.button("🔄 질문지 다시 만들기" if sheet else "📋 질문지 만들기", width="stretch", key="make_qsheet",
+                       disabled=not api_key or not rec.strip() or not major)
+    with b2:
+        if not rec.strip():
+            st.caption("생기부 원문이 없습니다. 생기부 PDF를 올리고 면접 패키지를 먼저 만들어 주세요.")
+        elif not sheet:
+            st.caption("AI를 한 번 불러 만듭니다(약 1분).")
+    if go:
+        with st.spinner(f"{uni} 질문 방식으로 {n}개 질문을 뽑는 중입니다... (약 1분)"):
+            new_sheet, err = make_question_sheet(rec, uni, major, student_name, n, exam_db, info, api_key)
+        st.session_state.qsheet_error = err
+        if new_sheet:
+            set_question_sheet_state(new_sheet, student_name, target_desc, uni, major)
+            save_question_sheet(st.session_state.get("current_record_id"), student_name, uni, major, new_sheet)
+        st.rerun()
+    if st.session_state.get("qsheet_error"):
+        st.warning(st.session_state.qsheet_error)
+    if not sheet:
+        return
+
+    files = st.session_state.get("qsheet_files") or (None, None)
+    d1, d2 = st.columns(2)
+    for col, path, label, key in ((d1, files[0], "📘 질문지 학생용 (.docx)", "dl_qsheet_stu"),
+                                  (d2, files[1], "📕 질문지 교사용 · 모범답안 (.docx)", "dl_qsheet_tea")):
+        if path and os.path.exists(path):
+            with open(path, "rb") as f:
+                col.download_button(label, f, file_name=os.path.basename(path), width="stretch", key=key)
+    st.caption(f"출제 기준: {sheet.get('basis', '')}" + (f" · {sheet['style_line']}" if sheet.get("style_line") else ""))
+    open_all = st.toggle("교사용 내용(모범답안·꼬리질문) 모두 펼치기", key="qsheet_open_all")
+    with st.container(height=700, border=False):
+        for n_, q in enumerate(sheet.get("qs") or [], 1):
+            with st.container(border=True):
+                tags = " · ".join(x for x in (q.get("type"), q.get("eval")) if x)
+                st.markdown(f"**{n_}. {_md_safe(q['q'])}**  \n:gray[{_md_safe(tags)}]")
+                if q.get("quote") or _src_line(q):
+                    color = "red" if q.get("found") is False else "gray"
+                    st.markdown(f"📍 **{_md_safe(_src_line(q) or '생기부')}**{_md_safe(_found_mark(q))}  \n"
+                                f":{color}[“{_md_safe(q.get('quote', ''))}”]")
+                with st.expander("📕 교사용: 모범답안 · 꼬리질문", expanded=open_all):
+                    if q.get("style"):
+                        st.caption("🏫 " + q["style"])
+                    st.markdown(_md_safe(q.get("answer", "")))
+                    if q.get("keys"):
+                        st.caption("핵심: " + " · ".join(q["keys"]))
+                    if q.get("follow"):
+                        st.markdown(f"🔥 **꼬리질문** {_md_safe(q['follow'])}")
+                    if q.get("avoid"):
+                        st.caption("✖ 피할 답변: " + q["avoid"])
+
+# -------------------------------------------------------------------------
 # [2-1] 생성된 문항에서 [질문]/[문제 N] ↔ [모범답안]/[모범답안 N] 쌍만 순서대로 뽑아내기
 #   (구글 시트 Apps Script의 _extractQAPairs와 동일한 로직의 파이썬 버전)
 # -------------------------------------------------------------------------
@@ -4389,6 +4669,9 @@ if "evaluation_sheet_file" not in st.session_state: st.session_state.evaluation_
 if "interview_card" not in st.session_state: st.session_state.interview_card = None
 if "interview_card_file" not in st.session_state: st.session_state.interview_card_file = None
 if "interview_card_error" not in st.session_state: st.session_state.interview_card_error = ""
+if "qsheet" not in st.session_state: st.session_state.qsheet = None
+if "qsheet_files" not in st.session_state: st.session_state.qsheet_files = None
+if "qsheet_error" not in st.session_state: st.session_state.qsheet_error = ""
 if "last_save_info" not in st.session_state: st.session_state.last_save_info = None
 
 # =========================================================================
@@ -4406,6 +4689,7 @@ import wave as _wave
 
 STU_PREFIX, ANS_PREFIX, CMT_PREFIX = "STU-", "ANS-", "CMT-"
 CARD_PREFIX = "CARD-"            # 면접 전날 요약카드
+QSHEET_PREFIX = "QSHEET-"        # 대학 맞춤 면접 질문지
 STU_DAILY_LIMIT = 30
 FB_CRITERIA = ["근거", "구조", "구체성", "전공연결"]
 FB_CRITERIA_HELP = {
@@ -4420,7 +4704,7 @@ _ROW_TOTAL = 76000             # 한 줄(result_text + chat_history)에 넣을 �
 
 
 def is_practice_id(rid):
-    return str(rid or "").startswith((STU_PREFIX, ANS_PREFIX, CMT_PREFIX, CARD_PREFIX))
+    return str(rid or "").startswith((STU_PREFIX, ANS_PREFIX, CMT_PREFIX, CARD_PREFIX, QSHEET_PREFIX))
 
 
 def _bundle_key(record_id):
@@ -5488,6 +5772,14 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                     st.session_state["growth_report_file"] = None
                     st.session_state["evaluation_sheet_file"] = None
                     st.session_state["interview_card_error"] = ""
+                    st.session_state["qsheet_error"] = ""
+                    try:
+                        set_question_sheet_state(load_question_sheet(row["id"]), _ld_name, _ld_desc,
+                                                 row["university"], row["major"])
+                    except Exception as e:
+                        st.session_state["qsheet"] = None
+                        st.session_state["qsheet_files"] = None
+                        st.session_state["qsheet_error"] = f"저장된 질문지를 불러오지 못했습니다: {e}"
                     try:
                         set_interview_card_state(load_interview_card(row["id"]), _ld_name, _ld_desc,
                                                  row["university"], row["major"])
@@ -6092,6 +6384,9 @@ if st.button("🚀 면접 패키지 생성 시작"):
             st.session_state.interview_card = None
             st.session_state.interview_card_file = None
             st.session_state.interview_card_error = ""
+            st.session_state.qsheet = None
+            st.session_state.qsheet_files = None
+            st.session_state.qsheet_error = ""
 
             display_text = to_display_text(result_text)
 
@@ -6232,6 +6527,10 @@ if st.session_state.chat_history:
             downloadable.append(("📚 생기부 쉬운 해설 (.docx)", st.session_state.easy_explanation_file))
         if st.session_state.get("evaluation_sheet_file"):
             downloadable.append(("📝 교사용 평가표 (.docx)", st.session_state.evaluation_sheet_file))
+        if interview_type == "생기부 기반 면접" and st.session_state.get("qsheet_files"):
+            _qs_stu, _qs_tea = st.session_state.qsheet_files
+            downloadable.append(("📋 면접 질문지 학생용 (.docx)", _qs_stu))
+            downloadable.append(("📋 면접 질문지 교사용 (.docx)", _qs_tea))
         if interview_type == "생기부 기반 면접" and st.session_state.get("interview_card_file"):
             downloadable.append(("🗂️ 면접 전날 요약카드 (.docx)", st.session_state.interview_card_file))
         if st.session_state.get("growth_report_file"):
@@ -6317,6 +6616,11 @@ if st.session_state.chat_history:
             st.markdown(st.session_state.easy_explanation_text)
 
     if interview_type == "생기부 기반 면접":
+        st.divider()
+        try:
+            render_question_sheet_section(student_name, uni, major, target_desc, api_key)
+        except Exception as e:
+            st.warning(f"면접 질문지 화면을 그리지 못했습니다: {e}")
         st.divider()
         try:
             render_interview_card_section(student_name, uni, major, target_desc, api_key)
