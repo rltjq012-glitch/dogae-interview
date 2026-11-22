@@ -907,6 +907,14 @@ def render_run_mode(student_name, uni, major, interview_type, target_desc):
     # ── 시작 전 ─────────────────────────────────────────────
     if not run or not any(k in by for k in run.get("keys", [])):
         picked = bank_selected_entries(bank)
+        where = st.segmented_control("어디서 진행할까요?", ["📱 패드·폰으로 (면접실)", "💻 이 컴퓨터에서"],
+                                     key="run_where", default="📱 패드·폰으로 (면접실)")
+        if where != "💻 이 컴퓨터에서":
+            render_device_run_panel(student_name, uni, major, interview_type, picked)
+            if interview_type == "생기부 기반 면접" and st.button("🏦 질문 다시 고르기", key="run_pick_dev"):
+                goto_section("🏦 질문 은행·질문지")
+                st.rerun()
+            return
         st.caption("질문을 하나씩 크게 띄우고, 대학 면접 시간으로 시간을 잽니다. 질문마다 상·중·하와 메모를 남기면 "
                    "끝낼 때 **평가표의 문항별 평가란**에 그대로 들어갑니다.")
         with st.container(border=True):
@@ -1573,4 +1581,378 @@ def render_class_practice_stats():
         st.dataframe(pd.DataFrame(rows).sort_values("최근 평균"), hide_index=True, width="stretch")
 
 
-__all__ = ["render_interview_profile", "logout", "require_login", "render_save_status", "set_highlight_state", "add_more_questions", "add_answers", "add_gap_cards", "_render_question_only", "render_card_view", "set_interview_card_state", "render_interview_card_section", "set_question_sheet_state", "render_question_sheet_section", "current_bank", "goto_section", "render_question_bank_section", "RUN_GRADES", "_run_timer_html", "_interview_minutes", "_run_move", "_run_toggle_tail", "_run_finish", "render_run_mode", "_app_base_url", "_qr_png", "_timer_html", "_score_bar_md", "_render_feedback", "_student_api_key", "render_student_page", "_student_ctx", "_student_save", "_student_practice_tab", "render_teacher_practice", "render_practice_board", "render_class_practice_stats"]
+# ---------------------------------------------------------------- 📱 패드·폰 면접관 모드
+# 교무실 컴퓨터에서 질문을 고르고 '면접관 링크'(QR·PIN)를 만들면, 면접실에서 패드나 폰으로
+# 질문을 하나씩 띄우고 상·중·하·메모를 남깁니다. 결과는 저장소의 IVR- 줄에 쌓이고,
+# 컴퓨터의 '🎙️ 모의면접 진행 → 📱 패드·폰' 화면에서 불러와 평가표를 만듭니다.
+MOBILE_CSS = """
+<style>
+[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"], header[data-testid="stHeader"],
+[data-testid="stToolbar"], footer, .hero-banner {display:none !important;}
+.block-container {padding: .8rem .7rem 5rem !important; max-width: 760px !important;}
+.stButton button, .stDownloadButton button, div[data-testid="stFormSubmitButton"] button {
+  min-height: 3.3rem; font-size: 1.12rem; font-weight: 600; border-radius: 12px;}
+div[data-testid="stElementContainer"]:has(div[data-testid="stButtonGroup"]) {width: 100% !important;}
+div[data-testid="stButtonGroup"] {width: 100% !important; display: flex !important;}
+div[data-testid="stButtonGroup"] div[role="radiogroup"] {width: 100% !important; max-width: none !important;
+  flex: 1 1 100% !important; display: flex !important;}
+div[data-testid="stButtonGroup"] button[role="radio"] {flex: 1 1 0 !important; min-height: 3.7rem; font-weight: 700;}
+div[data-testid="stButtonGroup"] button[role="radio"] * {font-size: 1.4rem !important;}
+div[data-testid="stButtonGroup"] button[role="radio"]:nth-child(1)[aria-checked="true"] {background: #2E7D32 !important; border-color: #2E7D32 !important;}
+div[data-testid="stButtonGroup"] button[role="radio"]:nth-child(2)[aria-checked="true"] {background: #F9A825 !important; border-color: #F9A825 !important;}
+div[data-testid="stButtonGroup"] button[role="radio"]:nth-child(3)[aria-checked="true"] {background: #C62828 !important; border-color: #C62828 !important;}
+div[data-testid="stButtonGroup"] button[role="radio"][aria-checked="true"] * {color: #fff !important;}
+div[data-testid="stHorizontalBlock"] {flex-wrap: nowrap !important; gap: .45rem !important;}
+div[data-testid="stColumn"] {min-width: 0 !important; width: auto !important; flex: 1 1 0 !important;}
+div.stButton > button[data-testid="stBaseButton-secondary"] {background: transparent !important;
+  color: inherit !important; border: 1.5px solid #cbd5e1 !important;}  /* 주된 버튼만 진하게 */
+input, textarea {font-size: 16px !important;}  /* 아이폰이 입력칸을 확대하지 않게 */
+</style>
+"""
+
+
+def interviewer_snapshot(entries):
+    """면접관 화면에 보낼 질문(교사용이라 모범답안·근거까지)."""
+    return [{"key": e["key"], "no": i, "q": e["q"], "tail": e.get("tail", ""), "answer": e.get("answer", ""),
+             "keys": e.get("keys") or [], "quote": e.get("quote", ""), "area": _qb_src_line(e), "src": e["src"]}
+            for i, e in enumerate(entries, 1)]
+
+
+def device_runs_cached(record_id, reload=False):
+    """패드·폰 진행 결과(화면을 그릴 때마다 저장소를 읽지 않도록 세션에 보관)."""
+    if not record_id:
+        return []
+    cache = st.session_state.setdefault("iv_runs_cache", {})
+    ck = _bundle_key(record_id)
+    if reload or ck not in cache:
+        try:
+            cache[ck] = load_device_runs(record_id)
+        except Exception:
+            cache[ck] = cache.get(ck, [])
+    return cache[ck]
+
+
+def _device_run_record(run, qs, status):
+    """진행 상태 → 저장할 결과 한 건."""
+    rows = [{"q": q["q"], "grade": run["grades"].get(q["key"], ""), "memo": run["memos"].get(q["key"], "")}
+            for q in qs if q["key"] in run["keys"]]
+    cnt = {g: sum(1 for r in rows if r["grade"] == g) for g in RUN_GRADES}
+    return {"id": run["id"], "link": run.get("link", ""), "at": run["at"], "status": status,
+            "i": run["i"], "n": len(rows), "total": run["total"], "sec": int(time.time() - run["start"]),
+            "grades": dict(run["grades"]), "memos": dict(run["memos"]), "counts": cnt, "rows": rows,
+            "ops": run.get("ops") or ["", "", ""], "evaluator": run.get("evaluator", ""), "device": "패드·폰"}
+
+
+def render_device_run_panel(student_name, uni, major, interview_type, picked):
+    """컴퓨터 화면: 면접관 링크(QR·PIN) 만들기와 패드·폰 결과 받아 평가표 만들기."""
+    record_id = st.session_state.get("current_record_id")
+    st.caption("교무실 컴퓨터에서 질문을 고른 뒤 **면접관 링크**를 만들고, 면접실에서 패드나 폰으로 QR을 찍어 진행하세요. "
+               "끝나면 결과가 이 화면으로 돌아와 평가표를 만들 수 있습니다.")
+    if not record_id:
+        st.info("먼저 위쪽 **💾 저장**을 눌러 이 학생 기록을 저장해 주세요. 저장된 기록에만 링크를 만들 수 있습니다.")
+        return
+    if not storage_is_shared():
+        st.warning("⚠️ 구글시트 저장이 설정되지 않아, 패드·폰에서 진행한 결과가 이 컴퓨터로 돌아오지 않습니다. "
+                   "구글시트(Apps Script) 연동 후 사용해 주세요.")
+    cache = st.session_state.setdefault("iv_link_cache", {})
+    ck = _bundle_key(record_id)
+    if st.session_state.pop("iv_reload", False) or ck not in cache:
+        rows = interviewer_link_rows(record_id)
+        link_id, link = (None, {})
+        if rows:
+            link_id = _row_get(rows[0], "id", "")
+            _, link = _load_json_row(link_id)
+        cache[ck] = (link_id, link)
+    link_id, link = cache[ck]
+
+    with st.container(border=True):
+        if not link_id:
+            st.markdown(f"**📱 면접관 링크 만들기** — 고른 질문 {len(picked)}개")
+            c1, c2 = st.columns([1, 2], vertical_alignment="bottom")
+            mins = c1.number_input("면접 시간(분)", 3, 60, _interview_minutes(uni, major), key="iv_minutes")
+            if c2.button("📱 면접관 링크 만들기", type="primary", width="stretch", disabled=not picked, key="iv_make"):
+                token = _pysecrets.token_urlsafe(9).replace("-", "x").replace("_", "y")
+                try:
+                    save_interviewer_link(token, record_id, student_name, uni, major, {
+                        "pin": f"{_pysecrets.randbelow(10000):04d}", "owner": current_teacher() or "",
+                        "created": _kst_stamp(), "minutes": int(mins), "type": interview_type,
+                        "qs": interviewer_snapshot(picked)})
+                    st.session_state["iv_reload"] = True
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"링크를 만들지 못했습니다: {e}")
+        else:
+            s_param = link_id[len(IVW_PREFIX):]
+            base = _app_base_url()
+            url = f"{base}/?iv={s_param}" if base else f"(앱 주소)/?iv={s_param}"
+            q1, q2 = st.columns([1, 2], vertical_alignment="center")
+            with q1:
+                png = _qr_png(url) if base else None
+                if png:
+                    st.image(png, width=190)
+            with q2:
+                st.markdown(f"#### PIN **{link.get('pin', '????')}**")
+                st.caption(f"질문 {len(link.get('qs', []))}개 · 면접 {link.get('minutes', 10)}분 · 보낸 시각 {link.get('synced', '')}")
+                st.code(url, language=None)
+                if not base:
+                    st.caption("앱 주소를 알아내지 못했습니다. Secrets에 APP_URL = \"https://...streamlit.app\"을 넣으면 QR이 나옵니다.")
+            b1, b2, b3 = st.columns(3)
+            token = s_param.split(".", 1)[1] if "." in s_param else s_param
+            keep = {k: link.get(k) for k in ("pin", "owner", "created", "minutes", "type")}
+            if b1.button("🔄 고른 질문 다시 보내기", width="stretch", disabled=not picked, key="iv_sync",
+                         help="질문 은행에서 질문을 바꿨다면 눌러 주세요. 진행 중인 패드·폰은 '처음 화면'으로 돌아가면 반영됩니다."):
+                save_interviewer_link(token, record_id, student_name, uni, major, dict(keep, qs=interviewer_snapshot(picked)))
+                st.session_state["iv_reload"] = True
+                st.rerun()
+            if b2.button("🔢 PIN 바꾸기", width="stretch", key="iv_pin"):
+                keep["pin"] = f"{_pysecrets.randbelow(10000):04d}"
+                save_interviewer_link(token, record_id, student_name, uni, major, dict(keep, qs=link.get("qs", [])))
+                st.session_state["iv_reload"] = True
+                st.rerun()
+            if b3.button("⛔ 링크 끊기", width="stretch", key="iv_cut", help="결과 기록은 남습니다."):
+                _delete_record_raw(link_id)
+                st.session_state["iv_reload"] = True
+                st.rerun()
+
+    h1, h2 = st.columns([3, 1], vertical_alignment="center")
+    h1.markdown("**📥 패드·폰에서 진행한 결과**")
+    reload = h2.button("🔄 새로고침", width="stretch", key="iv_runs_reload")
+    runs = device_runs_cached(record_id, reload=reload)
+    if not runs:
+        st.caption("아직 받은 결과가 없습니다. 면접이 끝나고 패드·폰에서 '저장하고 마치기'를 누른 뒤 새로고침해 주세요.")
+        return
+    for r in reversed(runs):
+        cnt = r.get("counts") or {}
+        graded = sum(1 for x in r.get("rows", []) if x.get("grade"))
+        done = r.get("status") == "완료"
+        with st.container(border=True):
+            st.markdown(f"**{r.get('at', '')}** · {'✅ 완료' if done else '⏳ 진행 중'} · 평가 {graded}/{r.get('n', 0)} · "
+                        f"상 {cnt.get('상', 0)} · 중 {cnt.get('중', 0)} · 하 {cnt.get('하', 0)}"
+                        + (f" · 면접관 {r['evaluator']}" if r.get("evaluator") else ""))
+            with st.expander("질문별 평가 · 메모 보기"):
+                st.dataframe(pd.DataFrame([{"번호": i, "질문": x["q"], "평가": x.get("grade") or "-", "메모": x.get("memo", "")}
+                                           for i, x in enumerate(r.get("rows", []), 1)]), hide_index=True, width="stretch")
+                ops = [o for o in (r.get("ops") or []) if o]
+                if ops:
+                    st.caption("종합 의견: " + " / ".join(ops))
+            if st.button("📝 이 결과로 평가표 만들기", key=f"iv_eval_{r.get('id')}", width="stretch", type="primary" if done else "secondary"):
+                try:
+                    st.session_state["last_run"] = {"for": student_name, "rows": r.get("rows", []), "ops": r.get("ops"),
+                                                    "at": r.get("at", "")}
+                    st.session_state.evaluation_sheet_file = create_evaluation_sheet_word(
+                        st.session_state.get("last_result_text", ""), student_name, uni, major, interview_type,
+                        evaluator=r.get("evaluator", ""), interview_date=str(r.get("at", ""))[:10].replace("-", ". ") + ".",
+                        include_questions=True, run_rows=r.get("rows", []), opinions=r.get("ops"))
+                    st.toast("평가표를 만들었습니다. 위쪽 📕 교사용 묶음에서 받으세요.", icon="📝")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ 평가표를 만들지 못했습니다: {e}")
+
+
+def _iv_save(sid, run, qs, status, row_info):
+    """패드·폰 진행 상태를 저장소에 남깁니다(실패해도 진행은 계속)."""
+    name, uni, major = row_info
+    try:
+        save_device_run(run["record_id"], name, uni, major, _device_run_record(run, qs, status))
+        run["saved_at"] = _kst_stamp()
+        run.pop("save_error", None)
+    except Exception as e:
+        run["save_error"] = str(e)[:120]
+
+
+def _iv_move(sid, step, qs, row_info):
+    run = st.session_state.get(f"iv_run_{sid}")
+    if not run:
+        return
+    run["i"] = max(0, min(len(run["keys"]) - 1, run["i"] + step))
+    run["q_start"] = time.time()
+    _iv_save(sid, run, qs, "진행 중", row_info)     # 폰 화면이 꺼져도 이어서 할 수 있게 넘길 때마다 저장
+
+
+def _iv_tail(sid, key):
+    run = st.session_state.get(f"iv_run_{sid}")
+    if run:
+        run["tails"][key] = not run["tails"].get(key)
+
+
+def _iv_finish(sid):
+    run = st.session_state.get(f"iv_run_{sid}")
+    if run:
+        run["done"] = True
+
+
+def render_interviewer_page(param):
+    """면접실에서 패드·폰으로 여는 면접관 화면(교사 로그인 없이 링크 + PIN)."""
+    st.markdown(MOBILE_CSS, unsafe_allow_html=True)
+    sid = re.sub(r"[^A-Za-z0-9._-]", "", str(param))[:80]
+    lk = f"iv_link_{sid}"
+    if lk not in st.session_state or st.session_state.pop(f"iv_relink_{sid}", False):
+        row, obj = _load_json_row(f"{IVW_PREFIX}{sid}")
+        st.session_state[lk] = (dict(row) if row else None, obj)
+    row, link = st.session_state[lk]
+    if not row or not link.get("qs") or not link.get("record_id"):
+        st.error("링크가 올바르지 않거나 끊긴 링크입니다. 교무실 컴퓨터에서 면접관 링크를 다시 만들어 주세요.")
+        st.stop()
+    name = str(_row_get(row, "student_name", ""))
+    uni, major = str(_row_get(row, "university", "")), str(_row_get(row, "major", ""))
+    row_info = (name, uni, major)
+    qs = link["qs"]
+    by = {q["key"]: q for q in qs}
+
+    ok = f"iv_ok_{sid}"
+    if not st.session_state.get(ok):
+        st.markdown(f"### 🎙️ {_md_safe(name)} 모의면접")
+        st.caption(f"{uni} · {major} · 질문 {len(qs)}개 · {link.get('minutes', 10)}분")
+        locked = st.session_state.get(f"iv_lock_{sid}", 0)
+        if time.time() < locked:
+            st.error(f"PIN을 여러 번 틀렸습니다. {int(locked - time.time()) + 1}초 뒤에 다시 시도해 주세요.")
+            st.stop()
+        with st.form("iv_pin_form"):
+            pin = st.text_input("면접관 PIN 4자리 (교무실 컴퓨터 화면에 있음)", type="password", max_chars=4)
+            go = st.form_submit_button("시작하기", width="stretch")
+        if go:
+            if hmac.compare_digest(str(pin or "").strip().encode(), str(link.get("pin", "")).encode()):
+                st.session_state[ok] = True
+                st.rerun()
+            fails = st.session_state.get(f"iv_fail_{sid}", 0) + 1
+            st.session_state[f"iv_fail_{sid}"] = fails
+            if fails >= 5:
+                st.session_state[f"iv_lock_{sid}"] = time.time() + 60
+                st.session_state[f"iv_fail_{sid}"] = 0
+            time.sleep(1)
+            st.error("PIN이 맞지 않습니다.")
+        st.stop()
+
+    rk = f"iv_run_{sid}"
+    run = st.session_state.get(rk)
+
+    # ── 시작 화면 ───────────────────────────────────────────
+    if not run:
+        st.markdown(f"### 🎙️ {_md_safe(name)} 모의면접")
+        st.caption(f"{uni} · {major} · 질문 {len(qs)}개 · {link.get('minutes', 10)}분")
+        try:
+            prev = [r for r in load_device_runs(link["record_id"]) if r.get("link") == sid and r.get("status") != "완료"]
+        except Exception:
+            prev = []
+        ev = st.text_input("면접관 이름 (평가표에 들어감, 비워도 됨)", key=f"iv_ev_{sid}")
+        mins = int(link.get("minutes", 10) or 10)
+
+        def new_run(base=None):
+            r = {"id": (base or {}).get("id") or uuid.uuid4().hex[:8], "link": sid, "record_id": link["record_id"],
+                 "keys": [q["key"] for q in qs], "i": 0, "start": time.time(), "q_start": time.time(),
+                 "total": mins * 60, "grades": {}, "memos": {}, "tails": {}, "done": False,
+                 "at": (base or {}).get("at") or _kst_stamp(), "evaluator": ev.strip(), "ops": ["", "", ""]}
+            if base:
+                r.update(i=min(int(base.get("i", 0)), len(qs) - 1), grades=dict(base.get("grades") or {}),
+                         memos=dict(base.get("memos") or {}), start=time.time() - int(base.get("sec", 0)),
+                         evaluator=ev.strip() or base.get("evaluator", ""))
+            return r
+
+        if prev:
+            p = prev[-1]
+            st.info(f"⏳ {p.get('at', '')}에 하던 면접이 있습니다 — {int(p.get('i', 0)) + 1}번 질문까지 진행")
+            if st.button("▶ 이어서 하기", type="primary", width="stretch", key=f"iv_resume_{sid}"):
+                st.session_state[rk] = new_run(p)
+                st.rerun()
+        if st.button("▶ 면접 시작" if not prev else "새로 시작", type="secondary" if prev else "primary",
+                     width="stretch", key=f"iv_start_{sid}"):
+            st.session_state[rk] = new_run()
+            _iv_save(sid, st.session_state[rk], qs, "진행 중", row_info)
+            st.rerun()
+        with st.expander(f"질문 {len(qs)}개 미리 보기"):
+            for q in qs:
+                st.caption(f"{q['no']}. {q['q']}")
+        st.caption("💡 면접 중에는 화면 자동 꺼짐 시간을 길게 해 두세요. 화면이 꺼져도 질문을 넘길 때마다 저장되어 '이어서 하기'로 돌아올 수 있습니다.")
+        if st.button("🔄 질문 다시 받기", width="stretch", key=f"iv_relink_btn_{sid}",
+                     help="교무실 컴퓨터에서 질문을 바꿔 보냈다면 눌러 주세요."):
+            st.session_state[f"iv_relink_{sid}"] = True
+            st.rerun()
+        return
+
+    keys = [k for k in run["keys"] if k in by]
+    n = len(keys)
+    run["i"] = min(run["i"], n - 1)
+
+    # ── 끝내기 화면 ─────────────────────────────────────────
+    if run.get("done"):
+        rec = _device_run_record(run, qs, "완료")
+        cnt = rec["counts"]
+        st.markdown(f"### ✅ {_md_safe(name)} 면접 끝")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("평가", f"{sum(1 for x in rec['rows'] if x['grade'])}/{n}")
+        c2.metric("걸린 시간", f"{rec['sec'] // 60}:{rec['sec'] % 60:02d}")
+        c3.metric("상·중·하", f"{cnt['상']}·{cnt['중']}·{cnt['하']}")
+        for i, x in enumerate(rec["rows"], 1):
+            st.caption(f"{i}. [{x['grade'] or '-'}] {x['q'][:50]}" + (f" — {x['memo']}" if x["memo"] else ""))
+        ops = run.setdefault("ops", ["", "", ""])
+        ops[0] = st.text_area("① 잘한 점", value=ops[0], key=f"iv_op1_{sid}", height=90)
+        ops[1] = st.text_area("② 보완할 점", value=ops[1], key=f"iv_op2_{sid}", height=90)
+        ops[2] = st.text_area("③ 다음 연습까지 지도 방향", value=ops[2], key=f"iv_op3_{sid}", height=80)
+        if st.button("💾 저장하고 마치기", type="primary", width="stretch", key=f"iv_save_{sid}"):
+            _iv_save(sid, run, qs, "완료", row_info)
+            if run.get("save_error"):
+                st.error(f"저장하지 못했습니다: {run['save_error']} — 다시 눌러 주세요.")
+            else:
+                st.session_state[rk] = None
+                st.success("저장했습니다. 교무실 컴퓨터의 🎙️ 모의면접 진행 → 📱 패드·폰 화면에서 '새로고침' 후 평가표를 만드세요.")
+                st.balloons()
+        if st.button("◀ 질문으로 돌아가기", width="stretch", key=f"iv_back_{sid}"):
+            run["done"] = False
+            st.rerun()
+        return
+
+    # ── 진행 중 ────────────────────────────────────────────
+    key = keys[run["i"]]
+    q = by[key]
+    import streamlit.components.v1 as _components
+    _components.html(_run_timer_html(run["total"] - (time.time() - run["start"]), time.time() - run["q_start"]), height=46)
+    st.progress((run["i"] + 1) / n, text=f"{_md_safe(name)} · 질문 {run['i'] + 1} / {n}")
+    with st.container(border=True):
+        st.markdown(f"<div style='font-size:1.55rem;font-weight:700;line-height:1.5;padding:.3rem .1rem'>"
+                    f"{_esc_html(q['q'])}</div>", unsafe_allow_html=True)
+        if run["tails"].get(key):
+            if q.get("tail"):
+                st.markdown(f"<div style='font-size:1.3rem;font-weight:600;color:#e65100;line-height:1.5;padding:.2rem .1rem'>"
+                            f"🔥 {_esc_html(q['tail'])}</div>", unsafe_allow_html=True)
+            else:
+                st.caption("🔥 준비된 꼬리질문이 없습니다. 답변을 듣고 직접 이어서 물어보세요.")
+        if q.get("area"):
+            st.caption(f"📍 {q['area']}")
+    g_key, m_key = f"iv_g_{sid}_{key}", f"iv_m_{sid}_{key}"
+    if g_key not in st.session_state and run["grades"].get(key):
+        st.session_state[g_key] = run["grades"][key]
+    if m_key not in st.session_state and run["memos"].get(key):
+        st.session_state[m_key] = run["memos"][key]
+    grade = st.segmented_control("평가", RUN_GRADES, key=g_key, label_visibility="collapsed")
+    memo = st.text_input("메모", key=m_key, placeholder="메모 (키보드 🎤로 말해서 입력해도 됩니다)",
+                         label_visibility="collapsed")
+    run["grades"][key] = grade or ""
+    run["memos"][key] = memo or ""
+    n1, n2, n3 = st.columns([1, 1.15, 1])
+    n1.button("◀", width="stretch", on_click=_iv_move, args=(sid, -1, qs, row_info), disabled=run["i"] == 0,
+              key=f"iv_prev_{sid}", help="이전 질문")
+    n2.button("🔥 꼬리", width="stretch", on_click=_iv_tail, args=(sid, key), key=f"iv_tail_{sid}",
+              help="꼬리질문 보기/숨기기")
+    if run["i"] < n - 1:
+        n3.button("다음 ▶", type="primary", width="stretch", on_click=_iv_move, args=(sid, 1, qs, row_info),
+                  key=f"iv_next_{sid}")
+    else:
+        n3.button("✅ 끝", type="primary", width="stretch", on_click=_iv_finish, args=(sid,), key=f"iv_last_{sid}")
+    done = sum(1 for k in keys if run["grades"].get(k))
+    st.caption(f"평가 {done}/{n}" + (f" · 저장 {run['saved_at'][11:]}" if run.get("saved_at") else "")
+               + (" · ⚠️ 저장 실패(다음에 다시 시도)" if run.get("save_error") else ""))
+    with st.expander("📕 모범답안 · 핵심 · 근거"):
+        if q.get("answer"):
+            st.markdown(_md_safe(q["answer"]))
+        if q.get("keys"):
+            st.caption("핵심: " + " · ".join(q["keys"]))
+        if q.get("quote"):
+            st.caption(f"📍 “{q['quote']}”")
+        if not (q.get("answer") or q.get("quote")):
+            st.caption("이 질문에는 모범답안이 없습니다.")
+    with st.popover("⏹ 면접 끝내기", width="stretch"):
+        st.caption("평가를 마치고 결과 화면으로 갑니다.")
+        st.button("끝내기", type="primary", width="stretch", on_click=_iv_finish, args=(sid,), key=f"iv_end_{sid}")
+
+
+__all__ = ["MOBILE_CSS", "interviewer_snapshot", "device_runs_cached", "_device_run_record", "render_device_run_panel", "_iv_save", "_iv_move", "_iv_tail", "_iv_finish", "render_interviewer_page", "render_interview_profile", "logout", "require_login", "render_save_status", "set_highlight_state", "add_more_questions", "add_answers", "add_gap_cards", "_render_question_only", "render_card_view", "set_interview_card_state", "render_interview_card_section", "set_question_sheet_state", "render_question_sheet_section", "current_bank", "goto_section", "render_question_bank_section", "RUN_GRADES", "_run_timer_html", "_interview_minutes", "_run_move", "_run_toggle_tail", "_run_finish", "render_run_mode", "_app_base_url", "_qr_png", "_timer_html", "_score_bar_md", "_render_feedback", "_student_api_key", "render_student_page", "_student_ctx", "_student_save", "_student_practice_tab", "render_teacher_practice", "render_practice_board", "render_class_practice_stats"]
