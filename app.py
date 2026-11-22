@@ -3631,11 +3631,6 @@ def render_card_view(hl, student_name, uni, major, interview_type, difficulty, t
                     st.divider()
         if hl.get("dropped"):
             st.caption(f"AI가 고른 문장 중 {hl['dropped']}개는 원문과 글자가 달라 칠하지 않았습니다(원문을 바꾸지 않기 위해).")
-    st.divider()
-    try:
-        render_teacher_practice(hl, student_name, uni, major)
-    except Exception as e:
-        st.warning(f"학생 연습 현황을 불러오지 못했습니다: {e}")
 
 # -------------------------------------------------------------------------
 # [2-0b] 🗂️ 면접 전날 최종 요약카드
@@ -5604,84 +5599,6 @@ require_login()
 exam_db, exam_db_files = load_exam_db(APP_DIR)
 univ_info_db, univ_info_files = load_univ_info(APP_DIR)
 
-with st.sidebar:
-    _teacher = current_teacher()
-    if _teacher:
-        st.markdown(f"👤 **{_teacher}** 선생님" + (" · 관리자" if is_admin() else ""))
-        if st.button("로그아웃", width="stretch", key="logout_button"):
-            logout()
-        st.divider()
-    else:
-        st.warning("🔓 로그인이 설정되지 않았습니다. 주소를 아는 누구나 저장된 학생 기록을 볼 수 있습니다.")
-
-    # Streamlit Cloud의 Secrets(GEMINI_API_KEY)에 키가 등록되어 있으면 자동으로 사용하고,
-    # 없을 경우에만 직접 입력창을 보여줍니다.
-    try:
-        api_key = st.secrets["GEMINI_API_KEY"]
-        st.success("🔑 API 키가 자동으로 연결되었습니다.")
-    except (KeyError, FileNotFoundError, AttributeError):
-        api_key = st.text_input("🔑 Gemini API Key", type="password")
-    if st.session_state.get("gemini_last_model"):
-        st.caption(f"🤖 최근 사용 AI 모델: {st.session_state['gemini_last_model']} (최신 모델 자동 선택)")
-    if api_key and st.button("🩺 AI 모델 연결 점검", width="stretch", key="gemini_diag_btn",
-                             help="최신 모델부터 아주 짧은 요청을 보내, 이 API 키로 실제로 쓸 수 있는 모델을 확인합니다."):
-        with st.spinner("모델마다 짧은 요청을 보내 확인하는 중입니다..."):
-            st.session_state["gemini_diag"] = diagnose_gemini_models(api_key)
-    if st.session_state.get("gemini_diag"):
-        with st.expander("🩺 모델 점검 결과", expanded=True):
-            st.dataframe(pd.DataFrame(st.session_state["gemini_diag"]), hide_index=True, width="stretch")
-            st.caption("✅ 모델 중 맨 위의 것이 자동으로 쓰입니다. 특정 모델을 고정하려면 Secrets에 "
-                       'GEMINI_MODEL = "모델이름" 을 넣으세요.')
-
-    if exam_db.empty:
-        st.warning("⚠️ 실제 기출 DB(master_interview_qa.csv)가 없습니다.\n앱과 같은 폴더에 파일을 넣어주세요.")
-    else:
-        st.success(f"📊 실제 기출 DB 연동됨\n{len(exam_db):,}건 / {exam_db['_uk'].nunique()}개 대학")
-        if len(exam_db_files) > 1:
-            st.caption("📎 읽은 파일 " + ", ".join(exam_db_files) + " (중복은 자동 제거)")
-
-    if univ_info_db.empty:
-        st.info("📋 대학별 면접 형식 정보(univ_interview_info.csv)가 없습니다.\n파일을 올리면 대학별 면접 시간·위원 수까지 반영됩니다.")
-    else:
-        st.success(f"📋 2026 면접 형식 정보\n{univ_info_db['대학'].nunique()}개 대학 / {len(univ_info_db)}개 학과")
-
-    if _appsscript_enabled():
-        st.success("☁️ 학생 기록: Google Sheets(Apps Script)에 반영구 저장 중")
-    elif _sheets_enabled():
-        st.success("☁️ 학생 기록: Google Sheets(서비스 계정)에 반영구 저장 중")
-    else:
-        st.info("💾 학생 기록: 로컬 임시 저장 중 (재배포 시 초기화될 수 있음)")
-
-    render_save_status()
-
-    # 구글시트 연결이 실제로 살아있는지 직접 확인 (토큰이 어긋나면 저장이 조용히 실패할 수 있음)
-    if _appsscript_enabled():
-        if st.button("🔌 구글시트 연결 테스트", width="stretch", key="conn_test_btn"):
-            try:
-                test_payload = {
-                    "token": st.secrets["APPS_SCRIPT_TOKEN"], "action": "save",
-                    "id": "__connection_test__", "student_name": "(연결테스트)",
-                    "university": "-", "major": "-", "result_text": "", "chat_history": "[]",
-                    "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
-                }
-                r = requests.post(st.secrets["APPS_SCRIPT_URL"], json=test_payload, timeout=30)
-                r.raise_for_status()
-                body = r.json()
-                if isinstance(body, dict) and body.get("status") == "ok":
-                    requests.post(
-                        st.secrets["APPS_SCRIPT_URL"],
-                        json={"token": st.secrets["APPS_SCRIPT_TOKEN"], "action": "delete", "id": "__connection_test__"},
-                        timeout=30,
-                    )
-                    st.success("✅ 구글시트 저장이 정상 동작합니다.")
-                else:
-                    st.error(f"❌ 저장 실패 응답: {body}\n\n토큰이 서로 다르거나 Apps Script를 새 버전으로 재배포하지 않았을 수 있습니다.")
-            except Exception as e:
-                st.error(f"❌ 연결 실패: {e}")
-
-# -------------------------------------------------------------------------
-# 📂 저장된 학생 기록 불러오기 (PDF 재업로드 없이 이전 작업 이어서 하기)
-# -------------------------------------------------------------------------
 def _rec_get(row, key, default=""):
     """sqlite3.Row와 Apps Script/Sheets에서 온 dict를 모두 안전하게 다루기 위한 헬퍼.
     (Apps Script 백엔드는 생기부 원문·면접유형·난이도를 저장하지 않으므로 해당 키가 없을 수 있음)"""
@@ -5691,9 +5608,8 @@ def _rec_get(row, key, default=""):
     except (KeyError, IndexError):
         return default
 
-render_class_practice_stats()
-
-with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=False):
+def render_record_loader(api_key):
+    """사이드바: 저장된 학생 기록 불러오기 · 성장 리포트 · 삭제."""
     saved_records = list_records()
     if not saved_records:
         st.caption("아직 저장된 기록이 없습니다. 문항을 한 번 생성하면 이 학생의 문항·대화가 자동으로 저장됩니다.")
@@ -5705,10 +5621,10 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
             + f"{str(r['updated_at'])[:16].replace('T', ' ')}": r["id"]
             for r in saved_records
         }
-        selected_label = st.selectbox("불러올 기록을 선택하세요", list(record_options.keys()), key="record_select_box")
-        col_load, col_delete, col_grow = st.columns(3)
-        with col_load:
-            if st.button("📥 이 기록 불러오기", width="stretch"):
+        selected_label = st.selectbox("불러올 기록", list(record_options.keys()), key="record_select_box",
+                                      label_visibility="collapsed", placeholder="학생 기록 선택")
+        with st.container():
+            if st.button("📥 이 기록 불러오기", width="stretch", type="primary", key="load_record_btn"):
                 row = get_record(record_options[selected_label])
                 if row:
                     st.session_state["region_select"] = "직접 입력"
@@ -5803,15 +5719,19 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                             pass
                     if not _rec_get(row, "student_record_text", ""):
                         st.info("ℹ️ 이 저장 방식은 생기부 원문은 따로 저장하지 않습니다. 문항/대화 내용은 그대로 불러왔고, 생기부 재분석이 필요하면 PDF를 다시 업로드해주세요.")
-                    st.success(f"'{row['student_name']}' 학생의 기록을 불러왔습니다.")
+                    st.session_state.pop("result_section", None)   # 새 학생은 첫 화면부터
+                    st.toast(f"'{row['student_name']}' 학생의 기록을 불러왔습니다.", icon="📥")
                     st.rerun()
-        with col_delete:
-            if st.button("🗑️ 이 기록 삭제", width="stretch"):
-                delete_record(record_options[selected_label])
-                st.success("삭제되었습니다.")
-                st.rerun()
-        with col_grow:
-            if st.button("📈 이 학생 성장 리포트", width="stretch"):
+        _c_grow, _c_del = st.columns([3, 2])
+        with _c_del:
+            with st.popover("🗑️ 삭제", width="stretch"):
+                st.caption("선택한 기록을 지웁니다. 되돌릴 수 없습니다.")
+                if st.button("삭제 확인", type="primary", width="stretch", key="confirm_delete_record"):
+                    delete_record(record_options[selected_label])
+                    st.toast("삭제했습니다.", icon="🗑️")
+                    st.rerun()
+        with _c_grow:
+            if st.button("📈 성장 리포트", width="stretch", key="growth_report_btn"):
                 if not api_key:
                     st.error("API 키를 입력해 주세요.")
                 else:
@@ -5826,7 +5746,7 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                         except Exception:
                             _practice_txt = ""
                     if len(matching) < 2 and not _practice_txt:
-                        st.warning(f"'{target_name}' 학생은 저장된 기록이 {len(matching)}개뿐이라 성장 비교가 어렵습니다. 연습을 몇 번 더 진행한 뒤 다시 시도해 주세요.")
+                        st.warning(f"'{target_name}' 학생은 기록이 {len(matching)}개뿐이라 성장 비교가 어렵습니다.")
                     else:
                         with st.spinner(f"'{target_name}' 학생의 {len(matching)}개 회차 기록을 분석해 성장 리포트를 작성하는 중입니다..."):
                             sessions = []
@@ -5845,39 +5765,129 @@ with st.expander("📂 저장된 학생 기록 불러오기 / 관리", expanded=
                                 report_text = call_gemini(build_growth_report_prompt(target_name, sessions, _practice_txt), api_key)
                                 report_path = create_growth_report_word(report_text, target_name)
                                 st.session_state.growth_report_file = report_path
-                                st.success(f"'{target_name}' 학생의 성장 리포트가 생성되었습니다.")
-                                with open(report_path, "rb") as f:
-                                    st.download_button(
-                                        "📈 성장 리포트 다운로드 (.docx)", f, file_name=os.path.basename(report_path),
-                                        width="stretch", key="dl_growth_report_inline"
-                                    )
-                                st.markdown(report_text)
+                                st.session_state.growth_report_text = report_text
+                                st.session_state.growth_report_for = target_name
+                                st.session_state.result_section = "📊 평가·리포트"
+                                st.toast(f"'{target_name}' 학생의 성장 리포트를 만들었습니다.", icon="📈")
+                                st.rerun()
                             except Exception as e:
                                 st.error(f"❌ 성장 리포트 생성 실패: {e}")
 
-with st.expander("📖 [클릭] 프로그램 사용 설명서 및 PDF OCR 변환 방법", expanded=False):
-    st.markdown("""
-    ### 🔑 Google Gemini API 키 발급 방법
-    1. **Google AI Studio 접속:** [Google AI Studio](https://aistudio.google.com/)에 접속합니다.
-    2. **구글 계정 로그인:** 평소 사용하는 구글 계정으로 로그인합니다.
-    3. **API 키 생성:** 좌측 상단 'Get API key' 버튼을 클릭하여 키 생성 후 복사합니다.
 
-    ### 📂 [중요] 생기부 PDF는 반드시 '텍스트 추출(OCR)'된 파일이어야 합니다!
-    * **왜 필요한가요?** 단순 이미지(스캔본) PDF는 AI가 글자를 읽지 못하므로, **마우스로 글자가 드래그되거나 텍스트로 인식되는 PDF**여야만 정상 분석이 가능합니다.
+with st.sidebar:
+    _teacher = current_teacher()
+    if _teacher:
+        _tc1, _tc2 = st.columns([3, 2], vertical_alignment="center")
+        _tc1.markdown(f"👤 **{_teacher}** 선생님" + (" · 관리자" if is_admin() else ""))
+        if _tc2.button("로그아웃", width="stretch", key="logout_button"):
+            logout()
+    else:
+        st.warning("🔓 로그인이 설정되지 않았습니다. 주소를 아는 누구나 저장된 학생 기록을 볼 수 있습니다.")
 
-    ### 🎙️ [신규] 휴대폰 음성 인식(STT) 면접 평가 기능 사용법!
-    * **1단계 (키보드 활용):** 휴대폰으로 접속 시, 하단 채팅창을 누른 후 **휴대폰 키보드에 있는 '마이크(🎤)' 버튼**을 누르고 말하면 텍스트로 바로 입력됩니다.
-    * **2단계 (무인 AI 면접관 모드):** 하단의 **[🎙️ 음성으로 면접 답변하기]** 버튼을 눌러 직접 녹음해 보세요. AI가 음성을 듣고 즉각적인 평가와 꼬리질문을 던져줍니다!
+    # Streamlit Cloud의 Secrets(GEMINI_API_KEY)에 키가 등록되어 있으면 자동으로 사용하고,
+    # 없을 경우에만 직접 입력창을 보여줍니다.
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+        st.caption("🔑 API 키 연결됨" + (f" · 🤖 {st.session_state['gemini_last_model']}"
+                                       if st.session_state.get("gemini_last_model") else ""))
+    except (KeyError, FileNotFoundError, AttributeError):
+        api_key = st.text_input("🔑 Gemini API Key", type="password")
 
-    ### 📊 전국 140개 대학 실제 면접 기출 데이터베이스 연동!
-    * `master_interview_qa.csv` 파일을 이 앱과 같은 폴더에 넣어두면, 지원 학과와 가장 유사한 **실제 대학 기출 질의응답 약 1.6만 건**을 자동으로 찾아 문항 생성에 참고합니다.
-    * 현재 DB 로딩 상태: **{db_status}**
+    # 꼭 알아야 하는 문제만 바깥에 보여 줍니다(평소에는 ⚙️ 관리 안에 접어 둠).
+    if exam_db.empty:
+        st.warning("⚠️ 실제 기출 DB(master_interview_qa.csv)가 없습니다.")
+    _last_save = st.session_state.get("last_save_info")
+    if _last_save and not _last_save.get("ok"):
+        st.error("⚠️ 마지막 저장이 실패했습니다. ⚙️ 관리에서 연결을 확인해 주세요.")
 
-    ### 💾 [신규] 학생 기록 자동 저장 및 불러오기
-    * 문항을 한 번 생성하면 해당 학생의 **생기부 텍스트 · 생성된 문항 · 피드백 대화 내역**이 자동으로 저장됩니다.
-    * 다음에 다시 접속했을 때는 위쪽 **'📂 저장된 학생 기록 불러오기'**에서 이름을 선택해 불러오면, PDF를 다시 업로드하지 않고 이어서 진행할 수 있습니다.
-    * ⚠️ 단, 이 저장 방식은 앱이 실행 중인 서버의 파일에 저장되는 방식입니다. 앱을 재배포(GitHub에 새로 커밋)하거나 서버가 완전히 재시작되면 저장된 기록이 초기화될 수 있으니, 중요한 학생 기록은 워드 파일로 다운로드해 별도 보관하시길 권장합니다.
-    """.format(db_status=f"✅ {len(exam_db):,}건 로드 완료 ({exam_db['_uk'].nunique() if not exam_db.empty else 0}개 대학)" if not exam_db.empty else "⚠️ master_interview_qa.csv 파일을 찾지 못해 기본 학습 패턴만 사용 중입니다."))
+    st.markdown("#### 📂 학생 기록")
+    render_record_loader(api_key)
+
+    st.divider()
+    with st.expander("⚙️ 관리 · 도구", expanded=False):
+        st.toggle("👥 여러 학생 일괄 생성 열기", key="show_batch",
+                  help="켜면 본문에 '여러 학생 한 번에 처리' 화면이 나타납니다.")
+        st.markdown("**저장소**")
+        if _appsscript_enabled():
+            st.caption("☁️ Google Sheets(Apps Script)에 반영구 저장 중")
+        elif _sheets_enabled():
+            st.caption("☁️ Google Sheets(서비스 계정)에 반영구 저장 중")
+        else:
+            st.caption("💾 로컬 임시 저장 중 (재배포 시 초기화될 수 있음)")
+        render_save_status()
+        # 구글시트 연결이 실제로 살아있는지 직접 확인 (토큰이 어긋나면 저장이 조용히 실패할 수 있음)
+        if _appsscript_enabled():
+            if st.button("🔌 구글시트 연결 테스트", width="stretch", key="conn_test_btn"):
+                try:
+                    test_payload = {
+                        "token": st.secrets["APPS_SCRIPT_TOKEN"], "action": "save",
+                        "id": "__connection_test__", "student_name": "(연결테스트)",
+                        "university": "-", "major": "-", "result_text": "", "chat_history": "[]",
+                        "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                    }
+                    r = requests.post(st.secrets["APPS_SCRIPT_URL"], json=test_payload, timeout=30)
+                    r.raise_for_status()
+                    body = r.json()
+                    if isinstance(body, dict) and body.get("status") == "ok":
+                        requests.post(
+                            st.secrets["APPS_SCRIPT_URL"],
+                            json={"token": st.secrets["APPS_SCRIPT_TOKEN"], "action": "delete", "id": "__connection_test__"},
+                            timeout=30,
+                        )
+                        st.success("✅ 구글시트 저장이 정상 동작합니다.")
+                    else:
+                        st.error(f"❌ 저장 실패 응답: {body}\n\n토큰이 서로 다르거나 Apps Script를 새 버전으로 재배포하지 않았을 수 있습니다.")
+                except Exception as e:
+                    st.error(f"❌ 연결 실패: {e}")
+
+        st.markdown("**데이터**")
+        if not exam_db.empty:
+            st.caption(f"📊 기출 DB {len(exam_db):,}건 · {exam_db['_uk'].nunique()}개 대학"
+                       + (f" ({', '.join(exam_db_files)})" if len(exam_db_files) > 1 else ""))
+        if univ_info_db.empty:
+            st.caption("📋 대학별 면접 형식 정보(univ_interview_info.csv)가 없습니다.")
+        else:
+            st.caption(f"📋 2026 면접 형식 {univ_info_db['대학'].nunique()}개 대학 · {len(univ_info_db)}개 학과")
+
+        st.markdown("**AI 모델**")
+        st.caption(f"🤖 최근 사용: {st.session_state.get('gemini_last_model') or '아직 없음'} (최신 모델 자동 선택)")
+        if api_key and st.button("🩺 AI 모델 연결 점검", width="stretch", key="gemini_diag_btn",
+                                 help="최신 모델부터 아주 짧은 요청을 보내, 이 API 키로 실제로 쓸 수 있는 모델을 확인합니다."):
+            with st.spinner("모델마다 짧은 요청을 보내 확인하는 중입니다..."):
+                st.session_state["gemini_diag"] = diagnose_gemini_models(api_key)
+        if st.session_state.get("gemini_diag"):
+            st.dataframe(pd.DataFrame(st.session_state["gemini_diag"]), hide_index=True, width="stretch")
+            st.caption('✅ 모델 중 맨 위의 것이 자동으로 쓰입니다. 고정하려면 Secrets에 GEMINI_MODEL = "모델이름"')
+
+    with st.popover("📖 사용 설명서", width="stretch"):
+        st.markdown("""
+        ### 🔑 Google Gemini API 키 발급 방법
+        1. **Google AI Studio 접속:** [Google AI Studio](https://aistudio.google.com/)에 접속합니다.
+        2. **구글 계정 로그인:** 평소 사용하는 구글 계정으로 로그인합니다.
+        3. **API 키 생성:** 좌측 상단 'Get API key' 버튼을 클릭하여 키 생성 후 복사합니다.
+
+        ### 📂 [중요] 생기부 PDF는 반드시 '텍스트 추출(OCR)'된 파일이어야 합니다!
+        * **왜 필요한가요?** 단순 이미지(스캔본) PDF는 AI가 글자를 읽지 못하므로, **마우스로 글자가 드래그되거나 텍스트로 인식되는 PDF**여야만 정상 분석이 가능합니다.
+
+        ### 🎙️ [신규] 휴대폰 음성 인식(STT) 면접 평가 기능 사용법!
+        * **1단계 (키보드 활용):** 휴대폰으로 접속 시, 하단 채팅창을 누른 후 **휴대폰 키보드에 있는 '마이크(🎤)' 버튼**을 누르고 말하면 텍스트로 바로 입력됩니다.
+        * **2단계 (무인 AI 면접관 모드):** 하단의 **[🎙️ 음성으로 면접 답변하기]** 버튼을 눌러 직접 녹음해 보세요. AI가 음성을 듣고 즉각적인 평가와 꼬리질문을 던져줍니다!
+
+        ### 📊 전국 140개 대학 실제 면접 기출 데이터베이스 연동!
+        * `master_interview_qa.csv` 파일을 이 앱과 같은 폴더에 넣어두면, 지원 학과와 가장 유사한 **실제 대학 기출 질의응답 약 1.6만 건**을 자동으로 찾아 문항 생성에 참고합니다.
+        * 현재 DB 로딩 상태: **{db_status}**
+
+        ### 💾 [신규] 학생 기록 자동 저장 및 불러오기
+        * 문항을 한 번 생성하면 해당 학생의 **생기부 텍스트 · 생성된 문항 · 피드백 대화 내역**이 자동으로 저장됩니다.
+        * 다음에 다시 접속했을 때는 왼쪽 사이드바 **'📂 학생 기록'**에서 이름을 선택해 불러오면, PDF를 다시 업로드하지 않고 이어서 진행할 수 있습니다.
+        * ⚠️ 단, 이 저장 방식은 앱이 실행 중인 서버의 파일에 저장되는 방식입니다. 앱을 재배포(GitHub에 새로 커밋)하거나 서버가 완전히 재시작되면 저장된 기록이 초기화될 수 있으니, 중요한 학생 기록은 워드 파일로 다운로드해 별도 보관하시길 권장합니다.
+        """.format(db_status=f"✅ {len(exam_db):,}건 로드 완료 ({exam_db['_uk'].nunique() if not exam_db.empty else 0}개 대학)" if not exam_db.empty else "⚠️ master_interview_qa.csv 파일을 찾지 못해 기본 학습 패턴만 사용 중입니다."))
+
+render_class_practice_stats()
+
+if st.session_state.get("growth_report_text") and not st.session_state.get("chat_history"):
+    with st.expander(f"📈 {st.session_state.get('growth_report_for', '')} 학생 성장 리포트", expanded=True):
+        st.markdown(st.session_state.growth_report_text)
 
 def _reset_if_invalid(key, options):
     """선택지가 바뀌어 저장된 값이 더 이상 목록에 없으면 선택을 초기화합니다."""
@@ -6154,99 +6164,100 @@ def build_sangbu_prompt(student_name, uni, major, student_record, combined_exam_
 # -------------------------------------------------------------------------
 # 👥 여러 학생 한 번에 처리 (일괄 생성) — 방과후반처럼 여러 학생을 한 번에 지도할 때 사용
 # -------------------------------------------------------------------------
-with st.expander("👥 여러 학생 한 번에 처리 (일괄 생성)", expanded=False):
-    st.caption(
-        "생기부 PDF 여러 개를 한 번에 올리면 학생별로 면접 패키지를 순서대로 생성하고, "
-        "학생/교사용 워드 문서를 모두 묶어 zip 파일 하나로 내려받을 수 있습니다. "
-        "(속도를 위해 일괄 처리에서는 '생기부 쉬운 해설'과 '평가요소 태깅'을 제외한 기본 문항만 생성하며, 각 학생 기록은 개별적으로도 자동 저장됩니다.)"
-    )
-    batch_files = st.file_uploader(
-        "생기부 PDF 여러 개 선택 (여러 파일 선택 가능)", type=["pdf"], accept_multiple_files=True, key="batch_pdf_uploader"
-    )
-    if batch_files:
-        default_rows = pd.DataFrame({
-            "파일명": [f.name for f in batch_files],
-            "학생명": [os.path.splitext(f.name)[0] for f in batch_files],
-            "대학": [uni] * len(batch_files),
-            "학과": [major if major else ""] * len(batch_files),
-        })
-        st.markdown("아래 표에서 학생명·대학·학과를 학생별로 확인/수정한 뒤 생성해 주세요.")
-        edited_rows = st.data_editor(
-            default_rows, key="batch_edit_table", width="stretch", hide_index=True,
-            disabled=["파일명"]
+if st.session_state.get("show_batch"):
+    with st.expander("👥 여러 학생 한 번에 처리 (일괄 생성)", expanded=True):
+        st.caption(
+            "생기부 PDF 여러 개를 한 번에 올리면 학생별로 면접 패키지를 순서대로 생성하고, "
+            "학생/교사용 워드 문서를 모두 묶어 zip 파일 하나로 내려받을 수 있습니다. "
+            "(속도를 위해 일괄 처리에서는 '생기부 쉬운 해설'과 '평가요소 태깅'을 제외한 기본 문항만 생성하며, 각 학생 기록은 개별적으로도 자동 저장됩니다.)"
         )
-        batch_difficulty = st.radio("⚙️ 일괄 적용 난이도", ["하 (기초)", "중 (표준)", "상 (압박)"], horizontal=True, index=1, key="batch_difficulty_radio")
+        batch_files = st.file_uploader(
+            "생기부 PDF 여러 개 선택 (여러 파일 선택 가능)", type=["pdf"], accept_multiple_files=True, key="batch_pdf_uploader"
+        )
+        if batch_files:
+            default_rows = pd.DataFrame({
+                "파일명": [f.name for f in batch_files],
+                "학생명": [os.path.splitext(f.name)[0] for f in batch_files],
+                "대학": [uni] * len(batch_files),
+                "학과": [major if major else ""] * len(batch_files),
+            })
+            st.markdown("아래 표에서 학생명·대학·학과를 학생별로 확인/수정한 뒤 생성해 주세요.")
+            edited_rows = st.data_editor(
+                default_rows, key="batch_edit_table", width="stretch", hide_index=True,
+                disabled=["파일명"]
+            )
+            batch_difficulty = st.radio("⚙️ 일괄 적용 난이도", ["하 (기초)", "중 (표준)", "상 (압박)"], horizontal=True, index=1, key="batch_difficulty_radio")
 
-        if st.button("🚀 일괄 생성 시작", width="stretch"):
-            if not api_key:
-                st.error("API 키를 입력해 주세요.")
-            elif edited_rows["학생명"].isna().any() or (edited_rows["학생명"].astype(str).str.strip() == "").any():
-                st.error("모든 행의 학생명을 입력해 주세요.")
-            elif edited_rows["학과"].isna().any() or (edited_rows["학과"].astype(str).str.strip() == "").any():
-                st.error("모든 행의 학과를 입력해 주세요.")
-            else:
-                file_map = {f.name: f for f in batch_files}
-                zip_buffer = io.BytesIO()
-                progress = st.progress(0, text="일괄 생성을 시작합니다...")
-                success_count = 0
-                fail_names = []
+            if st.button("🚀 일괄 생성 시작", width="stretch"):
+                if not api_key:
+                    st.error("API 키를 입력해 주세요.")
+                elif edited_rows["학생명"].isna().any() or (edited_rows["학생명"].astype(str).str.strip() == "").any():
+                    st.error("모든 행의 학생명을 입력해 주세요.")
+                elif edited_rows["학과"].isna().any() or (edited_rows["학과"].astype(str).str.strip() == "").any():
+                    st.error("모든 행의 학과를 입력해 주세요.")
+                else:
+                    file_map = {f.name: f for f in batch_files}
+                    zip_buffer = io.BytesIO()
+                    progress = st.progress(0, text="일괄 생성을 시작합니다...")
+                    success_count = 0
+                    fail_names = []
 
-                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                    total = len(edited_rows)
-                    for idx, row in edited_rows.reset_index(drop=True).iterrows():
-                        b_name = str(row["학생명"]).strip()
-                        b_uni = str(row["대학"]).strip() or uni
-                        b_major = str(row["학과"]).strip()
-                        progress.progress((idx) / total, text=f"({idx+1}/{total}) '{b_name}' 학생 처리 중...")
-                        try:
-                            b_file = file_map[row["파일명"]]
-                            b_file.seek(0)
-                            b_student_record = extract_text_from_pdf(b_file)
-
-                            b_strategy = build_reference_strategy(exam_db, b_uni, b_major, top_n=12, style_n=8)
-                            b_combined = PAST_EXAM_DATA + ("\n" + b_strategy["prompt_text"] if b_strategy["prompt_text"] else "")
-                            b_info_text = format_univ_info_for_prompt(get_univ_info(univ_info_db, b_uni, b_major))
-                            if b_info_text:
-                                b_combined += "\n" + b_info_text
-
-                            b_prompt = build_sangbu_prompt(b_name, b_uni, b_major, b_student_record, b_combined)
-                            b_result = call_gemini(b_prompt, api_key)
-
-                            b_stu_path, b_tea_path = create_word_files(
-                                b_result, b_name, "생기부 기반 면접", f"{b_uni}_{b_major}"
-                            )
-                            zf.write(b_stu_path, arcname=os.path.basename(b_stu_path))
-                            zf.write(b_tea_path, arcname=os.path.basename(b_tea_path))
-
-                            # 학생별 인쇄용 평가표도 함께 묶어줌 (AI 호출 없이 양식만 생성)
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                        total = len(edited_rows)
+                        for idx, row in edited_rows.reset_index(drop=True).iterrows():
+                            b_name = str(row["학생명"]).strip()
+                            b_uni = str(row["대학"]).strip() or uni
+                            b_major = str(row["학과"]).strip()
+                            progress.progress((idx) / total, text=f"({idx+1}/{total}) '{b_name}' 학생 처리 중...")
                             try:
-                                b_eval_path = create_evaluation_sheet_word(
-                                    b_result, b_name, b_uni, b_major, "생기부 기반 면접"
+                                b_file = file_map[row["파일명"]]
+                                b_file.seek(0)
+                                b_student_record = extract_text_from_pdf(b_file)
+
+                                b_strategy = build_reference_strategy(exam_db, b_uni, b_major, top_n=12, style_n=8)
+                                b_combined = PAST_EXAM_DATA + ("\n" + b_strategy["prompt_text"] if b_strategy["prompt_text"] else "")
+                                b_info_text = format_univ_info_for_prompt(get_univ_info(univ_info_db, b_uni, b_major))
+                                if b_info_text:
+                                    b_combined += "\n" + b_info_text
+
+                                b_prompt = build_sangbu_prompt(b_name, b_uni, b_major, b_student_record, b_combined)
+                                b_result = call_gemini(b_prompt, api_key)
+
+                                b_stu_path, b_tea_path = create_word_files(
+                                    b_result, b_name, "생기부 기반 면접", f"{b_uni}_{b_major}"
                                 )
-                                zf.write(b_eval_path, arcname=os.path.basename(b_eval_path))
-                            except Exception:
-                                pass
+                                zf.write(b_stu_path, arcname=os.path.basename(b_stu_path))
+                                zf.write(b_tea_path, arcname=os.path.basename(b_tea_path))
 
-                            b_record_id = new_record_id()
-                            save_record(
-                                b_record_id, b_name, b_uni, b_major, "생기부 기반 면접", batch_difficulty,
-                                b_student_record, b_result,
-                                [{"role": "assistant", "content": b_result}]
-                            )
-                            success_count += 1
-                        except Exception as e:
-                            fail_names.append(f"{b_name} ({e})")
-                        progress.progress((idx + 1) / total, text=f"({idx+1}/{total}) 처리 완료")
+                                # 학생별 인쇄용 평가표도 함께 묶어줌 (AI 호출 없이 양식만 생성)
+                                try:
+                                    b_eval_path = create_evaluation_sheet_word(
+                                        b_result, b_name, b_uni, b_major, "생기부 기반 면접"
+                                    )
+                                    zf.write(b_eval_path, arcname=os.path.basename(b_eval_path))
+                                except Exception:
+                                    pass
 
-                progress.empty()
-                if success_count > 0:
-                    st.success(f"✅ {success_count}명 처리 완료! 아래에서 zip 파일로 한 번에 내려받으세요.")
-                    st.download_button(
-                        "📦 전체 학생 워드 문서 zip 다운로드", zip_buffer.getvalue(),
-                        file_name="일괄_면접패키지.zip", mime="application/zip", width="stretch"
-                    )
-                if fail_names:
-                    st.error("❌ 다음 학생은 처리에 실패했습니다:\n" + "\n".join(fail_names))
+                                b_record_id = new_record_id()
+                                save_record(
+                                    b_record_id, b_name, b_uni, b_major, "생기부 기반 면접", batch_difficulty,
+                                    b_student_record, b_result,
+                                    [{"role": "assistant", "content": b_result}]
+                                )
+                                success_count += 1
+                            except Exception as e:
+                                fail_names.append(f"{b_name} ({e})")
+                            progress.progress((idx + 1) / total, text=f"({idx+1}/{total}) 처리 완료")
+
+                    progress.empty()
+                    if success_count > 0:
+                        st.success(f"✅ {success_count}명 처리 완료! 아래에서 zip 파일로 한 번에 내려받으세요.")
+                        st.download_button(
+                            "📦 전체 학생 워드 문서 zip 다운로드", zip_buffer.getvalue(),
+                            file_name="일괄_면접패키지.zip", mime="application/zip", width="stretch"
+                        )
+                    if fail_names:
+                        st.error("❌ 다음 학생은 처리에 실패했습니다:\n" + "\n".join(fail_names))
 
 if st.button("🚀 면접 패키지 생성 시작"):
     if not api_key: st.error("API 키를 입력해 주세요."); st.stop()
@@ -6387,6 +6398,7 @@ if st.button("🚀 면접 패키지 생성 시작"):
             st.session_state.qsheet = None
             st.session_state.qsheet_files = None
             st.session_state.qsheet_error = ""
+            st.session_state.pop("result_section", None)
 
             display_text = to_display_text(result_text)
 
@@ -6507,329 +6519,427 @@ if st.session_state.get("last_examples") is not None and not st.session_state.la
 # -------------------------------------------------------------------------
 # [5] 결과 대시보드 및 실시간 피드백
 # -------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# [5-0] 결과 화면 도우미: 학생 정보 줄 · 내려받기 묶음 · 화면 목록
+#   결과 화면은 한 줄로 길게 늘어놓지 않고, 위쪽 '화면 고르기'로 한 화면씩 봅니다.
+#   (고른 화면만 그리므로 빠르고, 버튼을 눌러도 보던 화면이 유지됩니다)
+# -------------------------------------------------------------------------
+RESULT_SECTIONS_SB = ["🖍️ 형광펜·질문 카드", "📋 질문지", "🎤 연습·첨삭", "📊 평가·리포트", "🗂️ 면접 전날"]
+RESULT_SECTIONS_JS = ["📝 문항", "🎤 연습·첨삭", "📊 평가·리포트"]
+
+def _interview_dday():
+    d = st.session_state.get("interview_date_input")
+    try:
+        gap = (d - datetime.date.today()).days
+    except Exception:
+        return ""
+    return f"면접 D-{gap}" if gap > 0 else ("면접 당일" if gap == 0 and st.session_state.get("evaluation_sheet_file") else "")
+
+def render_student_header(student_name, uni, major, interview_type, difficulty, is_sb, cards_on):
+    """맨 위 학생 정보 줄: 누구의 어떤 면접인지, 어디까지 했는지, 저장 상태."""
+    with st.container(border=True):
+        left, right = st.columns([3, 2], vertical_alignment="center")
+        with left:
+            dday = _interview_dday()
+            st.markdown(f"#### 🎓 {_md_safe(student_name or '학생')} · {_md_safe(uni or '')} {_md_safe(major or '')}"
+                        + (f" · :red[{dday}]" if dday else ""))
+            chips = [f"{'생기부' if is_sb else '제시문'} 면접 · 난이도 {str(difficulty).split(' ')[0]}", "📝 문항 ✅"]
+            if is_sb:
+                hl = st.session_state.get("highlight_data") or {}
+                if cards_on:
+                    keys = hl.get("q_keys") or []
+                    checks = st.session_state.get("card_checks") or {}
+                    done = sum(1 for k in keys if checks.get(k) == "자신 있음")
+                    chips.append(f"🖍️ 형광펜 ✅ (자신 있음 {done}/{len(keys)})")
+                else:
+                    chips.append("🖍️ 형광펜 ⬜")
+                chips.append("📋 질문지 " + ("✅" if st.session_state.get("qsheet") else "⬜"))
+                chips.append("🗂️ 요약카드 " + ("✅" if st.session_state.get("interview_card") else "⬜"))
+            n_talk = sum(1 for m in st.session_state.get("chat_history", []) if m.get("role") == "user")
+            chips.append(f"💬 연습·첨삭 {n_talk}회")
+            st.caption(" · ".join(chips))
+        with right:
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button("💾 저장", width="stretch", key="manual_save_btn",
+                             help="자동 저장되지만, 확실히 남겨 두고 싶을 때 누르세요."):
+                    info = save_current_session(student_name, uni, major, interview_type, difficulty, quiet=True)
+                    if info["ok"] and "구글시트" in info["where"]:
+                        st.toast(f"{info['where']}에 저장했습니다. ({info['at']})", icon="✅")
+                    elif info["ok"]:
+                        st.toast(f"로컬에 임시 저장했습니다. ({info['at']}) — 구글시트 연동이 설정되지 않았습니다.", icon="💾")
+                    else:
+                        st.error(f"❌ 구글시트 저장 실패: {info['error']}  \n로컬에만 임시 저장했습니다. 사이드바 ⚙️ 관리에서 연결을 확인해 주세요.")
+            with b2:
+                if st.button("🆕 새 회차로", width="stretch", key="manual_save_new_btn",
+                             help="같은 학생이라도 이번 연습을 '새 회차'로 따로 남깁니다. (성장 리포트용 회차가 쌓입니다)"):
+                    st.session_state.current_record_id = new_record_id()
+                    _new_key = f"{student_name}|{uni}|{major}|{interview_type}"
+                    st.session_state.current_record_key = _new_key
+                    st.session_state.setdefault("record_key_map", {})[_new_key] = st.session_state.current_record_id
+                    info = save_current_session(student_name, uni, major, interview_type, difficulty, quiet=True)
+                    if info["ok"]:
+                        st.toast(f"새 회차로 저장했습니다. ({info['at']} · {info['where']})", icon="🆕")
+                    else:
+                        st.error(f"❌ 저장 실패: {info['error']}")
+            render_save_status()
+
+def _zip_bytes(items):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        used = set()
+        for _, path in items:
+            name = os.path.basename(path)
+            if name in used:
+                continue
+            used.add(name)
+            z.write(path, arcname=name)
+    return buf.getvalue()
+
+def collect_downloads(student_name, interview_type, is_sb):
+    """(학생에게 줄 것, 교사용) 두 묶음으로 나눈 내려받기 목록."""
+    stu, tea = [], []
+    wf = st.session_state.get("word_files")
+    if wf:
+        stu_path, tea_path = wf
+        # 형광펜 카드가 있으면 그것이 '생기부 문장 + 질문 + 5세트 문항'을 모두 합친 최종본입니다.
+        hf = st.session_state.get("highlight_files")
+        if hf and is_sb:
+            stu_path, tea_path = hf[0], hf[1]
+        stu.append(("📘 학생용 워크북", stu_path))
+        tea.append(("📕 교사용 지침서", tea_path))
+        if hf and is_sb and len(hf) > 2:
+            stu.append(("📝 질문·답안 연습지", hf[2]))
+    if is_sb:
+        if st.session_state.get("easy_explanation_file"):
+            stu.append(("📚 생기부 쉬운 해설", st.session_state.easy_explanation_file))
+        if st.session_state.get("qsheet_files"):
+            qs_stu, qs_tea = st.session_state.qsheet_files
+            stu.append(("📋 면접 질문지 (학생용)", qs_stu))
+            tea.append(("📋 면접 질문지 (교사용·모범답안)", qs_tea))
+        if st.session_state.get("interview_card_file"):
+            stu.append(("🗂️ 면접 전날 요약카드", st.session_state.interview_card_file))
+    if st.session_state.get("evaluation_sheet_file"):
+        tea.append(("📝 면접 평가표", st.session_state.evaluation_sheet_file))
+    if st.session_state.get("growth_report_file") and st.session_state.get("growth_report_for") in (None, "", student_name):
+        tea.append(("📈 성장 리포트", st.session_state.growth_report_file))
+    # 피드백 대화는 실제로 주고받은 내용이 있을 때만
+    if any(m.get("role") == "user" for m in st.session_state.get("chat_history", [])):
+        try:
+            tea.append(("💬 피드백 대화 내역", create_chat_history_word(st.session_state.chat_history, student_name)))
+        except Exception:
+            pass
+    ok = lambda items: [(l, p) for l, p in items if p and os.path.exists(p)]
+    return ok(stu), ok(tea)
+
+def render_download_center(student_name, interview_type, is_sb):
+    stu, tea = collect_downloads(student_name, interview_type, is_sb)
+    safe = re.sub(r'[\\/:*?"<>|]', "_", student_name or "학생")
+    c1, c2 = st.columns(2)
+    for col, title, items, tag in ((c1, "📘 학생에게 줄 것", stu, "학생용"), (c2, "📕 교사용", tea, "교사용")):
+        with col, st.container(border=True):
+            st.markdown(f"**{title}** · {len(items)}개")
+            if not items:
+                st.caption("아직 만든 파일이 없습니다.")
+                continue
+            st.download_button(f"📦 {tag} 한 번에 받기 (.zip)", _zip_bytes(items),
+                               file_name=f"{safe}_{tag}_자료.zip", mime="application/zip",
+                               type="primary", width="stretch", key=f"dl_zip_{tag}")
+            with st.expander("파일 하나씩 받기"):
+                for i, (label, path) in enumerate(items):
+                    with open(path, "rb") as f:
+                        st.download_button(f"{label} (.docx)", f, file_name=os.path.basename(path),
+                                           width="stretch", key=f"dl_{tag}_{i}_{os.path.basename(path)}")
+
 if st.session_state.chat_history:
     st.markdown("<div class='step-text'>STEP 2 · 결과 확인 및 피드백</div>", unsafe_allow_html=True)
-    st.markdown("## 📋 면접 문항 대시보드 및 실시간 피드백")
-
-    if st.session_state.word_files:
-        stu_path, tea_path = st.session_state.word_files
-        # 형광펜 카드가 있으면 그것이 '생기부 문장 + 질문 + 5세트 문항'을 모두 합친 최종본입니다.
-        # (쉬운 해설은 학생용 워크북 부록, 브리핑·평가의도·모범답안·꼬리질문은 교사용 지침서에 들어 있음)
-        _hf = st.session_state.get("highlight_files")
-        if _hf and interview_type == "생기부 기반 면접":
-            stu_path, tea_path = _hf[0], _hf[1]
-
-        downloadable = [
-            ("📘 학생용 워크북 (.docx)", stu_path),
-            ("📕 교사용 지침서 (.docx)", tea_path),
-        ]
-        if interview_type == "생기부 기반 면접" and st.session_state.get("easy_explanation_file"):
-            downloadable.append(("📚 생기부 쉬운 해설 (.docx)", st.session_state.easy_explanation_file))
-        if st.session_state.get("evaluation_sheet_file"):
-            downloadable.append(("📝 교사용 평가표 (.docx)", st.session_state.evaluation_sheet_file))
-        if interview_type == "생기부 기반 면접" and st.session_state.get("qsheet_files"):
-            _qs_stu, _qs_tea = st.session_state.qsheet_files
-            downloadable.append(("📋 면접 질문지 학생용 (.docx)", _qs_stu))
-            downloadable.append(("📋 면접 질문지 교사용 (.docx)", _qs_tea))
-        if interview_type == "생기부 기반 면접" and st.session_state.get("interview_card_file"):
-            downloadable.append(("🗂️ 면접 전날 요약카드 (.docx)", st.session_state.interview_card_file))
-        if st.session_state.get("growth_report_file"):
-            downloadable.append(("📈 학생 성장 리포트 (.docx)", st.session_state.growth_report_file))
-        # 피드백 대화는 실제로 주고받은 내용이 있을 때만 내려받기를 보여 줍니다.
-        if any(m.get("role") == "user" for m in st.session_state.chat_history):
-            downloadable.append((
-                "💬 피드백 대화 내역 (.docx)",
-                create_chat_history_word(st.session_state.chat_history, student_name),
-            ))
-
-        downloadable = [(label, path) for label, path in downloadable if path and os.path.exists(path)]
-        download_cols = st.columns(max(min(len(downloadable), 4), 1))
-        for i, (label, path) in enumerate(downloadable):
-            with download_cols[i % len(download_cols)]:
-                with open(path, "rb") as f:
-                    st.download_button(
-                        label, f, file_name=os.path.basename(path),
-                        width="stretch", key=f"dl_{i}_{os.path.basename(path)}"
-                    )
-
-    # -------------------------------------------------------------------
-    # 💾 저장 (자동 저장 + 수동 저장 버튼)
-    #    문항 생성·음성 평가·답변 첨삭·피드백 때마다 자동 저장되지만,
-    #    자동 저장이 실패했거나 확실히 남겨두고 싶을 때 이 버튼으로 직접 저장할 수 있습니다.
-    # -------------------------------------------------------------------
-    save_col1, save_col_new, save_col2 = st.columns([1, 1, 2])
-    with save_col_new:
-        if st.button("🆕 새 기록으로 저장", width="stretch", key="manual_save_new_btn",
-                     help="같은 학생이라도 이번 연습을 '새로운 회차'로 따로 남기고 싶을 때 사용하세요. (성장 리포트용 회차가 쌓입니다)"):
-            st.session_state.current_record_id = new_record_id()
-            _new_key = f"{student_name}|{uni}|{major}|{interview_type}"
-            st.session_state.current_record_key = _new_key
-            st.session_state.setdefault("record_key_map", {})[_new_key] = st.session_state.current_record_id
-            new_info = save_current_session(student_name, uni, major, interview_type, difficulty, quiet=True)
-            if new_info["ok"]:
-                st.success(f"✅ 새 회차로 저장했습니다. ({new_info['at']} · {new_info['where']})")
-            else:
-                st.error(f"❌ 저장 실패: {new_info['error']}")
-    with save_col1:
-        if st.button("💾 지금 저장하기", width="stretch", key="manual_save_btn"):
-            manual_info = save_current_session(student_name, uni, major, interview_type, difficulty, quiet=True)
-            if manual_info["ok"] and "구글시트" in manual_info["where"]:
-                st.success(f"✅ {manual_info['where']}에 저장했습니다. ({manual_info['at']})")
-            elif manual_info["ok"]:
-                st.info(f"💾 로컬에 임시 저장했습니다. ({manual_info['at']}) — 구글시트 연동이 설정되지 않은 상태입니다.")
-            else:
-                st.error(
-                    f"❌ 구글시트 저장 실패: {manual_info['error']}\n\n"
-                    "로컬에만 임시 저장했습니다. 사이드바의 저장 상태와 Apps Script 토큰·재배포 상태를 확인해 주세요."
-                )
-    with save_col2:
-        render_save_status()
-
+    _is_sb = interview_type == "생기부 기반 면접"
     _hl = st.session_state.get("highlight_data")
-    if interview_type == "생기부 기반 면접" and not (_hl and _hl.get("items")):
-        with st.container(border=True):
-            st.markdown("**🖍️ 형광펜 생기부가 아직 없습니다**")
-            if st.session_state.get("highlight_error"):
-                st.caption(f"이유: {st.session_state.highlight_error}")
-            _has_record = bool(st.session_state.get("loaded_student_record_text", "").strip()) or bool(uploaded_file)
-            if not _has_record:
-                st.caption("생기부 원문이 없습니다. 위에서 생기부 PDF를 다시 올린 뒤 아래 버튼을 눌러 주세요.")
-            if st.button("🖍️ 형광펜·쉬운 해설 다시 만들기", disabled=not _has_record or not api_key,
-                         width="stretch", key="rerun_highlight"):
-                _rec = st.session_state.get("loaded_student_record_text", "")
-                if uploaded_file and not _rec.strip():
-                    _rec = extract_text_from_pdf(uploaded_file)
-                    st.session_state.loaded_student_record_text = _rec
-                with st.spinner("📚 생기부 해설과 🖍️ 형광펜 표시를 만드는 중입니다... (30초~1분)"):
-                    if run_explain_and_highlight(
-                        _rec, st.session_state.get("last_result_text", ""),
-                        cached_interview_profile(APP_DIR, uni, major), uni, student_name, target_desc, api_key,
-                    ):
-                        # 다시 만든 형광펜도 기록에 남겨, 다음에 불러올 때 그대로 나오게 합니다.
-                        save_current_session(student_name, uni, major, interview_type, difficulty, quiet=True)
-                st.rerun()
-    if _hl and _hl.get("items"):
-        render_card_view(_hl, student_name, uni, major, interview_type, difficulty, target_desc, api_key)
+    _cards_on = _is_sb and bool((_hl or {}).get("items"))
 
-    if st.session_state.get("easy_explanation_text"):
-        with st.expander("📚 생기부 쉬운 해설 미리보기 (고등학교 1학년 눈높이)", expanded=False):
-            st.markdown(st.session_state.easy_explanation_text)
+    render_student_header(student_name, uni, major, interview_type, difficulty, _is_sb, _cards_on)
+    render_download_center(student_name, interview_type, _is_sb)
 
-    if interview_type == "생기부 기반 면접":
-        st.divider()
+    _sections = RESULT_SECTIONS_SB if _is_sb else RESULT_SECTIONS_JS
+    if st.session_state.get("result_section") not in _sections:
+        st.session_state["result_section"] = st.session_state.get("_last_result_section") \
+            if st.session_state.get("_last_result_section") in _sections else _sections[0]
+    _sec = st.segmented_control("결과 화면", _sections, key="result_section", label_visibility="collapsed")
+    _sec = _sec or st.session_state.get("_last_result_section") or _sections[0]
+    st.session_state["_last_result_section"] = _sec
+
+    _first = st.session_state.chat_history[0] if st.session_state.chat_history else {}
+    _first_is_q = _first.get("role") == "assistant" and "### 📌" in str(_first.get("content", ""))
+
+    # ── 🖍️ 형광펜 · 질문 카드 (생기부) / 📝 문항 (제시문) ─────────────────────
+    if _sec in ("🖍️ 형광펜·질문 카드", "📝 문항"):
+        if _is_sb:
+            _hl = st.session_state.get("highlight_data")
+            if interview_type == "생기부 기반 면접" and not (_hl and _hl.get("items")):
+                with st.container(border=True):
+                    st.markdown("**🖍️ 형광펜 생기부가 아직 없습니다**")
+                    if st.session_state.get("highlight_error"):
+                        st.caption(f"이유: {st.session_state.highlight_error}")
+                    _has_record = bool(st.session_state.get("loaded_student_record_text", "").strip()) or bool(uploaded_file)
+                    if not _has_record:
+                        st.caption("생기부 원문이 없습니다. 위에서 생기부 PDF를 다시 올린 뒤 아래 버튼을 눌러 주세요.")
+                    if st.button("🖍️ 형광펜·쉬운 해설 다시 만들기", disabled=not _has_record or not api_key,
+                                 width="stretch", key="rerun_highlight"):
+                        _rec = st.session_state.get("loaded_student_record_text", "")
+                        if uploaded_file and not _rec.strip():
+                            _rec = extract_text_from_pdf(uploaded_file)
+                            st.session_state.loaded_student_record_text = _rec
+                        with st.spinner("📚 생기부 해설과 🖍️ 형광펜 표시를 만드는 중입니다... (30초~1분)"):
+                            if run_explain_and_highlight(
+                                _rec, st.session_state.get("last_result_text", ""),
+                                cached_interview_profile(APP_DIR, uni, major), uni, student_name, target_desc, api_key,
+                            ):
+                                # 다시 만든 형광펜도 기록에 남겨, 다음에 불러올 때 그대로 나오게 합니다.
+                                save_current_session(student_name, uni, major, interview_type, difficulty, quiet=True)
+                        st.rerun()
+
+            if _cards_on:
+                render_card_view(_hl, student_name, uni, major, interview_type, difficulty, target_desc, api_key)
+            elif _first_is_q:
+                with st.expander("📌 생성된 면접 문항", expanded=True):
+                    st.markdown(_first["content"])
+            if st.session_state.get("easy_explanation_text"):
+                with st.expander("📚 생기부 쉬운 해설 미리보기 (고등학교 1학년 눈높이)", expanded=False):
+                    st.markdown(st.session_state.easy_explanation_text)
+        elif _first:
+            st.markdown(_first.get("content", ""))
+
+    # ── 📋 질문지 ─────────────────────────────────────────────────────────────
+    elif _sec == "📋 질문지":
         try:
             render_question_sheet_section(student_name, uni, major, target_desc, api_key)
         except Exception as e:
             st.warning(f"면접 질문지 화면을 그리지 못했습니다: {e}")
-        st.divider()
+
+    # ── 🗂️ 면접 전날 ─────────────────────────────────────────────────────────
+    elif _sec == "🗂️ 면접 전날":
         try:
             render_interview_card_section(student_name, uni, major, target_desc, api_key)
         except Exception as e:
             st.warning(f"요약카드 화면을 그리지 못했습니다: {e}")
 
-    # -------------------------------------------------------------------
-    # 📝 교사용 면접 평가표 (인쇄해서 손으로 채점하는 양식)
-    # -------------------------------------------------------------------
-    with st.expander("📝 평가표에 평가 교사·면접 일자 넣기", expanded=False):
-        st.caption(
-            "실제 대학 학생부종합전형 면접 평가요소(학업역량·전공적합성·인성·발전가능성)와 면접 태도 평가 기준을 바탕으로 "
-            "**항목당 10점 만점 / 총 100점** 채점표와 종합의견란이 들어간 A4 양식을 만듭니다. 인쇄해서 면접 현장에서 바로 채점하실 수 있습니다."
-        )
-        col_ev1, col_ev2 = st.columns(2)
-        with col_ev1:
-            evaluator_name = st.text_input("평가 교사 성명", value="", placeholder="예: 김기섭", key="evaluator_name_input")
-        with col_ev2:
-            interview_date_input = st.date_input("면접 일자", value=datetime.date.today(), key="interview_date_input")
-        include_q = st.checkbox("생성된 면접 질문을 '문항별 평가란'에 함께 넣기", value=True, key="eval_include_questions")
+    # ── 📊 평가 · 리포트 ──────────────────────────────────────────────────────
+    elif _sec == "📊 평가·리포트":
+        with st.container(border=True):
+            st.markdown("**📝 교사용 면접 평가표**")
+            st.caption(
+                "실제 대학 학생부종합전형 면접 평가요소(학업역량·전공적합성·인성·발전가능성)와 면접 태도 평가 기준을 바탕으로 "
+                "**항목당 10점 만점 / 총 100점** 채점표와 종합의견란이 들어간 A4 양식을 만듭니다. 인쇄해서 면접 현장에서 바로 채점하실 수 있습니다."
+            )
+            col_ev1, col_ev2 = st.columns(2)
+            with col_ev1:
+                evaluator_name = st.text_input("평가 교사 성명", value="", placeholder="예: 김기섭", key="evaluator_name_input")
+            with col_ev2:
+                interview_date_input = st.date_input("면접 일자", value=datetime.date.today(), key="interview_date_input")
+            include_q = st.checkbox("생성된 면접 질문을 '문항별 평가란'에 함께 넣기", value=True, key="eval_include_questions")
 
-        if st.button("📝 평가표에 반영하기", width="stretch"):
-            try:
-                date_str = interview_date_input.strftime("%Y. %m. %d.") if interview_date_input else ""
-                st.session_state.evaluation_sheet_file = create_evaluation_sheet_word(
-                    st.session_state.get("last_result_text", ""), student_name, uni, major, interview_type,
-                    evaluator=evaluator_name.strip(), interview_date=date_str, include_questions=include_q
-                )
-                st.rerun()  # 위쪽 '📝 교사용 평가표' 버튼이 새 파일을 내려받도록 다시 그립니다.
-            except Exception as e:
-                st.error(f"❌ 평가표 생성에 실패했습니다: {e}")
-
-    st.divider()
-
-    _cards_on = (interview_type == "생기부 기반 면접"
-                 and bool((st.session_state.get("highlight_data") or {}).get("items")))
-    for _mi, message in enumerate(st.session_state.chat_history):
-        with st.chat_message(message["role"]):
-            if _cards_on and _mi == 0 and message["role"] == "assistant" and "### 📌" in str(message["content"]):
-                # 문항 원문은 위 형광펜 질문 카드에 이미 모두 합쳐져 있으므로 다시 펼쳐 보여 주지 않습니다.
-                st.markdown(
-                    "🖍️ 문항은 위 **형광펜 질문 카드**에 근거 문장과 함께 정리했습니다. "
-                    "각 질문의 **'답변 가이드'**에서 평가 의도·모범 답안·꼬리질문을 볼 수 있습니다.  \n"
-                    "문항을 고치거나 더 만들고 싶으면 아래 채팅창에 말씀해 주세요."
-                )
+            if st.button("📝 평가표에 반영하기", width="stretch"):
+                try:
+                    date_str = interview_date_input.strftime("%Y. %m. %d.") if interview_date_input else ""
+                    st.session_state.evaluation_sheet_file = create_evaluation_sheet_word(
+                        st.session_state.get("last_result_text", ""), student_name, uni, major, interview_type,
+                        evaluator=evaluator_name.strip(), interview_date=date_str, include_questions=include_q
+                    )
+                    st.toast("평가표에 반영했습니다. 위쪽 📕 교사용 묶음에서 받으세요.", icon="📝")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ 평가표 생성에 실패했습니다: {e}")
+        _gr = st.session_state.get("growth_report_text")
+        with st.container(border=True):
+            st.markdown("**📈 학생 성장 리포트**")
+            if _gr and st.session_state.get("growth_report_for") in (None, "", student_name):
+                st.markdown(_gr)
+            elif _gr:
+                st.caption(f"지금 있는 리포트는 '{st.session_state.get('growth_report_for')}' 학생 것입니다. "
+                           "이 학생 리포트는 왼쪽 📂 학생 기록에서 '📈 성장 리포트'를 눌러 만드세요.")
             else:
+                st.caption("왼쪽 📂 학생 기록에서 학생을 고르고 '📈 성장 리포트'를 누르면 여기에 나옵니다. "
+                           "저장된 회차와 휴대폰 연습 기록을 비교해 무엇이 늘었는지 정리합니다.")
+
+    # ── 🎤 연습 · 첨삭 ────────────────────────────────────────────────────────
+    elif _sec == "🎤 연습·첨삭":
+        if _cards_on:
+            try:
+                render_teacher_practice(_hl, student_name, uni, major)
+            except Exception as e:
+                st.warning(f"학생 연습 현황을 불러오지 못했습니다: {e}")
+            st.divider()
+        elif _is_sb:
+            st.caption("📱 형광펜 질문 카드를 만들면 학생 휴대폰 연습 링크도 여기서 만들 수 있습니다.")
+        st.markdown("### 💬 답변 연습 · 문항 고치기")
+        _talk = st.session_state.chat_history[1:] if _first_is_q else st.session_state.chat_history
+        if not _talk:
+            st.caption("아직 주고받은 내용이 없습니다. 녹음하거나, 써온 답변을 첨삭받거나, 아래 입력창에 문항 수정 요청을 적어 보세요.")
+        for message in _talk:
+            with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-    st.markdown("💡 **Tip:** 아래 채팅창에서 📱휴대폰 키보드 마이크(🎤)를 눌러 말하거나, 우측 🎙️ 녹음 버튼을 활용해 보세요!")
+        st.markdown("💡 **Tip:** 아래 채팅창에서 📱휴대폰 키보드 마이크(🎤)를 눌러 말하거나, 우측 🎙️ 녹음 버튼을 활용해 보세요!")
 
-    audio_value = st.audio_input("🎙️ 음성으로 면접 답변하기 (녹음 버튼을 누르고 답변을 말해보세요!)")
+        audio_value = st.audio_input("🎙️ 음성으로 면접 답변하기 (녹음 버튼을 누르고 답변을 말해보세요!)")
 
-    if audio_value is not None:
-        if st.session_state.last_audio_size != audio_value.size:
-            if not api_key:
-                st.error("API 키를 입력해 주세요.")
-            else:
-                with st.spinner("AI 면접관이 학생의 음성을 분석하고 답변을 평가 중입니다..."):
-                    audio_bytes = audio_value.read()
-                    eval_result = call_gemini_audio_eval(audio_bytes, api_key)
-
-                    st.session_state.chat_history.append({"role": "user", "content": "[🎙️ 음성 답변 제출 완료]"})
-                    st.session_state.chat_history.append({"role": "assistant", "content": eval_result})
-
-                    st.session_state.last_audio_size = audio_value.size
-
-                    if st.session_state.get("current_record_id"):
-                        save_record(
-                            st.session_state.current_record_id, student_name, uni, major, interview_type, difficulty,
-                            st.session_state.get("loaded_student_record_text", ""),
-                            st.session_state.get("last_result_text", ""), st.session_state.chat_history
-                        )
-
-                    st.rerun()
-
-    # -------------------------------------------------------------------
-    # ✍️ 글로 써온 답변 첨삭 받기 (음성 없이, 미리 작성해온 답변을 첨삭)
-    #    새 저장소를 따로 만들지 않고, 기존 chat_history/save_record를 그대로 재사용합니다.
-    # -------------------------------------------------------------------
-    with st.expander("✍️ 미리 써온 답변, 글로 첨삭받기", expanded=False):
-        qa_pairs_for_feedback = extract_qa_pairs(st.session_state.get("last_result_text", ""))
-        if not qa_pairs_for_feedback:
-            st.caption("첨삭받을 문항이 없습니다. 먼저 면접 패키지를 생성해 주세요.")
-        else:
-            q_labels = [
-                (re.sub(r'\s+', ' ', p["q"]).strip()[:50] + ("…" if len(p["q"]) > 50 else "")) or f"질문 {i+1}"
-                for i, p in enumerate(qa_pairs_for_feedback)
-            ]
-            selected_q_idx = st.selectbox(
-                "첨삭받을 질문을 선택하세요", range(len(q_labels)),
-                format_func=lambda i: f"Q{i+1}. {q_labels[i]}", key="written_answer_q_select"
-            )
-            written_answer = st.text_area("학생이 직접 작성한 답변을 붙여넣어 주세요", height=150, key="written_answer_text")
-            if st.button("✍️ 이 답변 첨삭 받기", width="stretch"):
+        if audio_value is not None:
+            if st.session_state.last_audio_size != audio_value.size:
                 if not api_key:
                     st.error("API 키를 입력해 주세요.")
-                elif not written_answer.strip():
-                    st.error("첨삭받을 답변을 먼저 입력해 주세요.")
                 else:
-                    with st.spinner("AI 면접관이 답변을 첨삭하는 중입니다..."):
-                        selected_q = qa_pairs_for_feedback[selected_q_idx]["q"]
-                        critique_prompt = f"""
-                        당신은 대입 면접을 지도하는 날카로운 면접관입니다. 아래 면접 질문에 대해 학생이 직접 글로 작성해온 답변을 첨삭해 주세요.
+                    with st.spinner("AI 면접관이 학생의 음성을 분석하고 답변을 평가 중입니다..."):
+                        audio_bytes = audio_value.read()
+                        eval_result = call_gemini_audio_eval(audio_bytes, api_key)
 
-                        [면접 질문]
-                        {selected_q}
+                        st.session_state.chat_history.append({"role": "user", "content": "[🎙️ 음성 답변 제출 완료]"})
+                        st.session_state.chat_history.append({"role": "assistant", "content": eval_result})
 
-                        [학생이 작성한 답변]
-                        {written_answer}
-
-                        [지시사항]
-                        1. **[논리성]**: 답변의 논리적 흐름이 자연스러운지, 비약은 없는지 평가하세요.
-                        2. **[구체성]**: 추상적인 말에 그치지 않고 본인의 경험·탐구 내용을 구체적으로 담았는지 평가하세요.
-                        3. **[전공 연계성]**: 지원 전공/학과와의 연결고리가 잘 드러나는지 평가하세요.
-                        4. **[수정 제안]**: 위 문제점을 반영해 더 나은 답변 예시를 직접 다시 써서 보여주세요.
-                        5. 칭찬만 늘어놓지 말고, 실제 입학사정관처럼 냉정하고 건설적으로 첨삭하세요.
-                        """
-                        critique_result = call_gemini(critique_prompt, api_key)
-
-                    st.session_state.chat_history.append({
-                        "role": "user",
-                        "content": f"[✍️ 서술형 답변 제출]\nQ. {selected_q}\nA. {written_answer}"
-                    })
-                    st.session_state.chat_history.append({"role": "assistant", "content": critique_result})
-
-                    if st.session_state.get("current_record_id"):
-                        save_record(
-                            st.session_state.current_record_id, student_name, uni, major, interview_type, difficulty,
-                            st.session_state.get("loaded_student_record_text", ""),
-                            st.session_state.get("last_result_text", ""), st.session_state.chat_history
-                        )
-                    st.rerun()
-
-    if user_feedback := st.chat_input("질문을 더 어렵게 하거나 답변을 입력해보세요 (키보드 마이크🎤 활용 가능)"):
-        st.session_state.chat_history.append({"role": "user", "content": user_feedback})
-        with st.chat_message("user"):
-            st.markdown(user_feedback)
-
-        with st.chat_message("assistant"):
-            with st.spinner("요청하신 내용을 처리 중입니다..."):
-                doc_request_words = ["만들어", "생성", "다운", "파일", "문서로", "저장", "그래", "응", "네", "해줘"]
-                is_doc_request = any(w in user_feedback for w in doc_request_words) and len(user_feedback.strip()) < 15
-
-                if is_doc_request:
-                    chat_path = create_chat_history_word(st.session_state.chat_history, student_name)
-                    response_text = "네! 지금까지 나눈 대화 내용을 깔끔한 워드 문서로 생성했습니다. 상단 또는 아래의 **'💬 피드백 대화 내역 (.docx)'** 다운로드 버튼을 클릭해 주세요!"
-                    st.markdown(response_text)
-                    st.session_state.chat_history.append({"role": "assistant", "content": response_text})
-                    st.rerun()
-                else:
-                    required_template = TEMPLATE_SANGBU if interview_type == "생기부 기반 면접" else TEMPLATE_JESIMUN
-                    add_instruction = "\n(주의: 독립 세트를 최소 2세트 이상 추가로 더 생성해 주세요!)" if any(w in user_feedback for w in ["더", "추가", "많이", "늘려", "또"]) else ""
-
-                    # 이전에 생성했던 문항 원문을 함께 넘겨서 "무엇을 수정해야 하는지" AI가 알 수 있게 함
-                    # '[실제 기출]' 칸은 AI에게 보내지 않고 떼어 두었다가, 수정본에 그대로 다시 붙입니다.
-                    previous_full = st.session_state.get("last_result_text", "")
-                    previous_content = strip_real_cases(previous_full)
-
-                    feedback_prompt = f"""
-                    당신은 면접 출제위원입니다. 아래는 방금 전 당신이 생성했던 면접 문항 원문입니다.
-                    사용자의 피드백에 맞게 이 내용을 수정/보완하되,
-                    심도 있는 학술적/실천적 깊이를 유지하면서 **반드시 다음 템플릿 구조와 [키워드]를 토씨 하나 틀리지 말고 유지**해 주세요.
-                    {add_instruction}
-
-                    [직전에 생성했던 문항 원문]
-                    {previous_content}
-
-                    [강제 유지 템플릿]
-                    {required_template}
-
-                    사용자 피드백: "{user_feedback}"
-                    """
-                    try:
-                        new_result = inject_real_cases(
-                            call_gemini(feedback_prompt, api_key), extract_real_cases(previous_full)
-                        )
-                        st.session_state.last_result_text = new_result
-                        display_text = to_display_text(new_result)
-
-                        full_response = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)"
-
-                        st.markdown(full_response)
-                        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
-
-                        stu_path, tea_path = create_word_files(new_result, student_name, interview_type, target_desc)
-                        st.session_state.word_files = (stu_path, tea_path)
-                        # 형광펜 워크북·지침서도 수정된 문항을 반영해 다시 만듭니다.
-                        if st.session_state.get("highlight_data"):
-                            try:
-                                set_highlight_state(st.session_state.highlight_data,
-                                                    st.session_state.get("highlight_raw_items", []),
-                                                    student_name, target_desc)
-                            except Exception:
-                                pass
-                        try:
-                            st.session_state.evaluation_sheet_file = create_evaluation_sheet_word(
-                                new_result, student_name, uni, major, interview_type
-                            )
-                        except Exception:
-                            pass
+                        st.session_state.last_audio_size = audio_value.size
 
                         if st.session_state.get("current_record_id"):
                             save_record(
                                 st.session_state.current_record_id, student_name, uni, major, interview_type, difficulty,
                                 st.session_state.get("loaded_student_record_text", ""),
-                                new_result, st.session_state.chat_history
+                                st.session_state.get("last_result_text", ""), st.session_state.chat_history
                             )
 
                         st.rerun()
 
-                    except Exception as e:
-                        st.error(f"피드백 반영 중 오류가 발생했습니다: {e}")
+        # -------------------------------------------------------------------
+        # ✍️ 글로 써온 답변 첨삭 받기 (음성 없이, 미리 작성해온 답변을 첨삭)
+        #    새 저장소를 따로 만들지 않고, 기존 chat_history/save_record를 그대로 재사용합니다.
+        # -------------------------------------------------------------------
+        with st.expander("✍️ 미리 써온 답변, 글로 첨삭받기", expanded=False):
+            qa_pairs_for_feedback = extract_qa_pairs(st.session_state.get("last_result_text", ""))
+            if not qa_pairs_for_feedback:
+                st.caption("첨삭받을 문항이 없습니다. 먼저 면접 패키지를 생성해 주세요.")
+            else:
+                q_labels = [
+                    (re.sub(r'\s+', ' ', p["q"]).strip()[:50] + ("…" if len(p["q"]) > 50 else "")) or f"질문 {i+1}"
+                    for i, p in enumerate(qa_pairs_for_feedback)
+                ]
+                selected_q_idx = st.selectbox(
+                    "첨삭받을 질문을 선택하세요", range(len(q_labels)),
+                    format_func=lambda i: f"Q{i+1}. {q_labels[i]}", key="written_answer_q_select"
+                )
+                written_answer = st.text_area("학생이 직접 작성한 답변을 붙여넣어 주세요", height=150, key="written_answer_text")
+                if st.button("✍️ 이 답변 첨삭 받기", width="stretch"):
+                    if not api_key:
+                        st.error("API 키를 입력해 주세요.")
+                    elif not written_answer.strip():
+                        st.error("첨삭받을 답변을 먼저 입력해 주세요.")
+                    else:
+                        with st.spinner("AI 면접관이 답변을 첨삭하는 중입니다..."):
+                            selected_q = qa_pairs_for_feedback[selected_q_idx]["q"]
+                            critique_prompt = f"""
+                            당신은 대입 면접을 지도하는 날카로운 면접관입니다. 아래 면접 질문에 대해 학생이 직접 글로 작성해온 답변을 첨삭해 주세요.
+
+                            [면접 질문]
+                            {selected_q}
+
+                            [학생이 작성한 답변]
+                            {written_answer}
+
+                            [지시사항]
+                            1. **[논리성]**: 답변의 논리적 흐름이 자연스러운지, 비약은 없는지 평가하세요.
+                            2. **[구체성]**: 추상적인 말에 그치지 않고 본인의 경험·탐구 내용을 구체적으로 담았는지 평가하세요.
+                            3. **[전공 연계성]**: 지원 전공/학과와의 연결고리가 잘 드러나는지 평가하세요.
+                            4. **[수정 제안]**: 위 문제점을 반영해 더 나은 답변 예시를 직접 다시 써서 보여주세요.
+                            5. 칭찬만 늘어놓지 말고, 실제 입학사정관처럼 냉정하고 건설적으로 첨삭하세요.
+                            """
+                            critique_result = call_gemini(critique_prompt, api_key)
+
+                        st.session_state.chat_history.append({
+                            "role": "user",
+                            "content": f"[✍️ 서술형 답변 제출]\nQ. {selected_q}\nA. {written_answer}"
+                        })
+                        st.session_state.chat_history.append({"role": "assistant", "content": critique_result})
+
+                        if st.session_state.get("current_record_id"):
+                            save_record(
+                                st.session_state.current_record_id, student_name, uni, major, interview_type, difficulty,
+                                st.session_state.get("loaded_student_record_text", ""),
+                                st.session_state.get("last_result_text", ""), st.session_state.chat_history
+                            )
+                        st.rerun()
+
+        if user_feedback := st.chat_input("질문을 더 어렵게 하거나 답변을 입력해보세요 (키보드 마이크🎤 활용 가능)"):
+            st.session_state.chat_history.append({"role": "user", "content": user_feedback})
+            with st.chat_message("user"):
+                st.markdown(user_feedback)
+
+            with st.chat_message("assistant"):
+                with st.spinner("요청하신 내용을 처리 중입니다..."):
+                    doc_request_words = ["만들어", "생성", "다운", "파일", "문서로", "저장", "그래", "응", "네", "해줘"]
+                    is_doc_request = any(w in user_feedback for w in doc_request_words) and len(user_feedback.strip()) < 15
+
+                    if is_doc_request:
+                        chat_path = create_chat_history_word(st.session_state.chat_history, student_name)
+                        response_text = "네! 지금까지 나눈 대화 내용을 깔끔한 워드 문서로 생성했습니다. 상단 또는 아래의 **'💬 피드백 대화 내역 (.docx)'** 다운로드 버튼을 클릭해 주세요!"
+                        st.markdown(response_text)
+                        st.session_state.chat_history.append({"role": "assistant", "content": response_text})
+                        st.rerun()
+                    else:
+                        required_template = TEMPLATE_SANGBU if interview_type == "생기부 기반 면접" else TEMPLATE_JESIMUN
+                        add_instruction = "\n(주의: 독립 세트를 최소 2세트 이상 추가로 더 생성해 주세요!)" if any(w in user_feedback for w in ["더", "추가", "많이", "늘려", "또"]) else ""
+
+                        # 이전에 생성했던 문항 원문을 함께 넘겨서 "무엇을 수정해야 하는지" AI가 알 수 있게 함
+                        # '[실제 기출]' 칸은 AI에게 보내지 않고 떼어 두었다가, 수정본에 그대로 다시 붙입니다.
+                        previous_full = st.session_state.get("last_result_text", "")
+                        previous_content = strip_real_cases(previous_full)
+
+                        feedback_prompt = f"""
+                        당신은 면접 출제위원입니다. 아래는 방금 전 당신이 생성했던 면접 문항 원문입니다.
+                        사용자의 피드백에 맞게 이 내용을 수정/보완하되,
+                        심도 있는 학술적/실천적 깊이를 유지하면서 **반드시 다음 템플릿 구조와 [키워드]를 토씨 하나 틀리지 말고 유지**해 주세요.
+                        {add_instruction}
+
+                        [직전에 생성했던 문항 원문]
+                        {previous_content}
+
+                        [강제 유지 템플릿]
+                        {required_template}
+
+                        사용자 피드백: "{user_feedback}"
+                        """
+                        try:
+                            new_result = inject_real_cases(
+                                call_gemini(feedback_prompt, api_key), extract_real_cases(previous_full)
+                            )
+                            st.session_state.last_result_text = new_result
+                            display_text = to_display_text(new_result)
+
+                            full_response = display_text + "\n\n---\n💬 **방금까지 나눈 문항 내용과 피드백 대화 내용을 한글 문서(.docx)로 만들어 드릴까요?** (원하시면 **'그래 만들어줘'**라고 말씀해 주세요!)"
+
+                            st.markdown(full_response)
+                            st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+
+                            stu_path, tea_path = create_word_files(new_result, student_name, interview_type, target_desc)
+                            st.session_state.word_files = (stu_path, tea_path)
+                            # 형광펜 워크북·지침서도 수정된 문항을 반영해 다시 만듭니다.
+                            if st.session_state.get("highlight_data"):
+                                try:
+                                    set_highlight_state(st.session_state.highlight_data,
+                                                        st.session_state.get("highlight_raw_items", []),
+                                                        student_name, target_desc)
+                                except Exception:
+                                    pass
+                            try:
+                                st.session_state.evaluation_sheet_file = create_evaluation_sheet_word(
+                                    new_result, student_name, uni, major, interview_type
+                                )
+                            except Exception:
+                                pass
+
+                            if st.session_state.get("current_record_id"):
+                                save_record(
+                                    st.session_state.current_record_id, student_name, uni, major, interview_type, difficulty,
+                                    st.session_state.get("loaded_student_record_text", ""),
+                                    new_result, st.session_state.chat_history
+                                )
+
+                            st.rerun()
+
+                        except Exception as e:
+                            st.error(f"피드백 반영 중 오류가 발생했습니다: {e}")
