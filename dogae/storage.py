@@ -633,6 +633,8 @@ STU_PREFIX, ANS_PREFIX, CMT_PREFIX = "STU-", "ANS-", "CMT-"
 CARD_PREFIX = "CARD-"            # 면접 전날 요약카드
 QSHEET_PREFIX = "QSHEET-"        # 대학 맞춤 면접 질문지
 QBANK_PREFIX = "QBANK-"          # 질문 은행 선택 · 모의면접 진행 기록
+IVW_PREFIX = "IVW-"              # 면접관(패드·폰) 진행 링크
+IVR_PREFIX = "IVR-"              # 패드·폰에서 진행한 모의면접 결과
 FB_CRITERIA = ["근거", "구조", "구체성", "전공연결"]
 FB_CRITERIA_HELP = {
     "근거": "생기부 속 활동을 근거로 들었나",
@@ -645,7 +647,8 @@ _ROW_TOTAL = 76000             # 한 줄(result_text + chat_history)에 넣을 �
 
 
 def is_practice_id(rid):
-    return str(rid or "").startswith((STU_PREFIX, ANS_PREFIX, CMT_PREFIX, CARD_PREFIX, QSHEET_PREFIX, QBANK_PREFIX))
+    return str(rid or "").startswith((STU_PREFIX, ANS_PREFIX, CMT_PREFIX, CARD_PREFIX, QSHEET_PREFIX, QBANK_PREFIX,
+                                    IVW_PREFIX, IVR_PREFIX))
 
 
 def _bundle_key(record_id):
@@ -809,4 +812,33 @@ def practice_answer_rows():
     return [r for r in rows if str(_row_get(r, "id", "")).startswith(ANS_PREFIX)]
 
 
-__all__ = ["OWNER_SEP", "_ADMIN_KEY", "_split_names", "_auth_config", "auth_enabled", "current_teacher", "is_admin", "new_record_id", "record_owner", "can_access_record", "_OUT_DIR_PREFIX", "_prune_old_out_dirs", "_out_path", "SHEET_CELL_LIMIT", "load_saved_history", "_current_card_checks", "history_for_save", "load_json_safe", "_fit_history", "dump_chat_history", "RECORD_COLUMNS", "GOOGLE_SHEET_SCOPES", "_sheets_enabled", "_get_records_worksheet", "init_records_db", "_sqlite_save_record", "_sqlite_list_records", "_sqlite_get_record", "_sqlite_delete_record", "_sheets_all_values", "_sheets_save_record", "_sheets_list_records", "_sheets_get_record", "_sheets_delete_record", "_appsscript_enabled", "_appsscript_save_record", "_appsscript_list_records", "_appsscript_get_record", "_appsscript_delete_record", "save_record", "_save_record_impl", "_fetch_records_cached", "_clear_records_cache", "_list_records_raw", "_get_record_raw", "_delete_record_raw", "_delete_record_impl", "list_records", "get_record", "delete_record", "save_current_session", "save_interview_card", "load_interview_card", "save_question_sheet", "load_question_sheet", "load_qbank_state", "save_qbank_state", "STU_PREFIX", "ANS_PREFIX", "CMT_PREFIX", "CARD_PREFIX", "QSHEET_PREFIX", "QBANK_PREFIX", "FB_CRITERIA", "FB_CRITERIA_HELP", "_ROW_CHUNK", "_ROW_TOTAL", "is_practice_id", "_bundle_key", "storage_is_shared", "_save_json_row", "_load_json_row", "practice_link_rows", "save_student_link", "load_answers", "_prune_answers", "save_answers", "load_comments", "save_comments", "_student_record_tab", "practice_answer_rows"]
+
+# ---------------------------------------------------------------- 📱 패드·폰 면접관 링크 · 결과
+def interviewer_link_rows(record_id):
+    """이 기록의 면접관 링크 줄(보통 하나)."""
+    try:
+        rows = _list_records_raw()
+    except Exception:
+        rows = []
+    pre = f"{IVW_PREFIX}{_bundle_key(record_id)}."
+    return [r for r in rows if str(_row_get(r, "id", "")).startswith(pre)]
+
+
+def save_interviewer_link(token, record_id, name, uni, major, obj):
+    obj = dict(obj, record_id=record_id, synced=_kst_stamp())
+    return _save_json_row(f"{IVW_PREFIX}{_bundle_key(record_id)}.{token}", name, uni, major, "면접관링크", obj)
+
+
+def load_device_runs(record_id):
+    _, obj = _load_json_row(f"{IVR_PREFIX}{_bundle_key(record_id)}")
+    return list(obj.get("runs") or [])
+
+
+def save_device_run(record_id, name, uni, major, rec):
+    """패드·폰 진행 결과 한 건을 넣거나 바꿉니다(같은 id면 바꿈, 최근 10건만 보관)."""
+    runs = [r for r in load_device_runs(record_id) if r.get("id") != rec.get("id")] + [rec]
+    return _save_json_row(f"{IVR_PREFIX}{_bundle_key(record_id)}", name, uni, major, "면접관결과",
+                          {"record_id": record_id, "runs": runs[-10:]})
+
+
+__all__ = ["IVW_PREFIX", "IVR_PREFIX", "interviewer_link_rows", "save_interviewer_link", "load_device_runs", "save_device_run", "OWNER_SEP", "_ADMIN_KEY", "_split_names", "_auth_config", "auth_enabled", "current_teacher", "is_admin", "new_record_id", "record_owner", "can_access_record", "_OUT_DIR_PREFIX", "_prune_old_out_dirs", "_out_path", "SHEET_CELL_LIMIT", "load_saved_history", "_current_card_checks", "history_for_save", "load_json_safe", "_fit_history", "dump_chat_history", "RECORD_COLUMNS", "GOOGLE_SHEET_SCOPES", "_sheets_enabled", "_get_records_worksheet", "init_records_db", "_sqlite_save_record", "_sqlite_list_records", "_sqlite_get_record", "_sqlite_delete_record", "_sheets_all_values", "_sheets_save_record", "_sheets_list_records", "_sheets_get_record", "_sheets_delete_record", "_appsscript_enabled", "_appsscript_save_record", "_appsscript_list_records", "_appsscript_get_record", "_appsscript_delete_record", "save_record", "_save_record_impl", "_fetch_records_cached", "_clear_records_cache", "_list_records_raw", "_get_record_raw", "_delete_record_raw", "_delete_record_impl", "list_records", "get_record", "delete_record", "save_current_session", "save_interview_card", "load_interview_card", "save_question_sheet", "load_question_sheet", "load_qbank_state", "save_qbank_state", "STU_PREFIX", "ANS_PREFIX", "CMT_PREFIX", "CARD_PREFIX", "QSHEET_PREFIX", "QBANK_PREFIX", "FB_CRITERIA", "FB_CRITERIA_HELP", "_ROW_CHUNK", "_ROW_TOTAL", "is_practice_id", "_bundle_key", "storage_is_shared", "_save_json_row", "_load_json_row", "practice_link_rows", "save_student_link", "load_answers", "_prune_answers", "save_answers", "load_comments", "save_comments", "_student_record_tab", "practice_answer_rows"]

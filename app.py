@@ -292,6 +292,12 @@ if _stu_param:
     render_student_page(_stu_param)
     st.stop()
 
+# 면접관 링크(?iv=...)로 들어오면 패드·폰용 모의면접 진행 화면만 보여 줍니다(링크 + PIN).
+_iv_param = st.query_params.get("iv")
+if _iv_param:
+    render_interviewer_page(_iv_param)
+    st.stop()
+
 require_login()
 
 exam_db, exam_db_files = load_exam_db(APP_DIR)
@@ -1270,7 +1276,8 @@ def render_student_header(student_name, uni, major, interview_type, difficulty, 
                 chips.append("🗂️ 요약카드 " + ("✅" if st.session_state.get("interview_card") else "⬜"))
             n_talk = sum(1 for m in st.session_state.get("chat_history", []) if m.get("role") == "user")
             chips.append(f"💬 연습·첨삭 {n_talk}회")
-            n_run = len(st.session_state.get("qbank_runs") or [])
+            n_run = len(st.session_state.get("qbank_runs") or []) + sum(
+                1 for r in device_runs_cached(st.session_state.get("current_record_id")) if r.get("status") == "완료")
             if n_run:
                 chips.append(f"🎙️ 모의면접 {n_run}회")
             st.caption(" · ".join(chips))
@@ -1480,12 +1487,15 @@ if st.session_state.chat_history:
                     st.rerun()
                 except Exception as e:
                     st.error(f"❌ 평가표 생성에 실패했습니다: {e}")
-        _runs = st.session_state.get("qbank_runs") or []
+        _runs = [dict(r, device="컴퓨터") for r in (st.session_state.get("qbank_runs") or [])] + [
+            dict(r, grades=r.get("counts") or {}) for r in device_runs_cached(st.session_state.get("current_record_id"))
+            if r.get("status") == "완료"]
+        _runs.sort(key=lambda r: str(r.get("at", "")))
         if _runs:
             with st.container(border=True):
                 st.markdown("**🎙️ 모의면접 진행 기록**")
                 st.dataframe(pd.DataFrame([{
-                    "회차": i, "일시": r.get("at", ""), "질문": r.get("n", 0),
+                    "회차": i, "일시": r.get("at", ""), "기기": r.get("device", "컴퓨터"), "질문": r.get("n", 0),
                     "상": r.get("grades", {}).get("상", 0), "중": r.get("grades", {}).get("중", 0),
                     "하": r.get("grades", {}).get("하", 0),
                     "걸린 시간": f"{int(r.get('sec', 0)) // 60}:{int(r.get('sec', 0)) % 60:02d}"}
